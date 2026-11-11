@@ -7,6 +7,7 @@
 """
 import asyncio
 import logging
+from .engines.base import evaluate_main
 
 log = logging.getLogger("claudeanty.sync")
 
@@ -46,7 +47,7 @@ class Synchronizer:
             self._bound[leader] = ctx
         for page in ctx.pages:
             try:
-                await page.evaluate(SYNC_JS)
+                await evaluate_main(page, SYNC_JS)
             except Exception:  # noqa: BLE001
                 pass
         self.leader, self.followers = leader, [f for f in followers if f != leader]

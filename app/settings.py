@@ -19,14 +19,24 @@ DEFAULTS = {
     "accent": "blue",
     "theme": "dark",
     "embed_browser": False,
+    "collapsed_sections": [],  # свёрнутые разделы боковой панели
     "chrome_engine": "chrome",  # chrome — установленный Google Chrome, chromium — Chrome for Testing (Playwright)
-    "update_check": True,  # проверять, не отстаёт ли версия движка
+    "update_check": True,
+    "automation_driver": "patchright",  # patchright (без следов CDP Runtime) | playwright  # проверять, не отстаёт ли версия движка
     "warmup_sites": [],  # пусто = встроенный список
     "warmup_count": 8,
     "warmup_dwell": 12,
     "backup_keep": 10,  # сколько последних резервных копий хранить
     "backup_secrets": False,  # класть ли пароли и 2FA в резервные копии (в открытом виде)
-    "rpa_parallel": 3,  # сколько профилей сценарий выполняет одновременно
+    "change_ip_on_start": True,  # менять IP мобильного прокси (если есть ссылка) перед запуском профиля
+    "change_ip_cooldown": 60,  # не чаще, секунд
+    "change_ip_wait": 45,  # сколько ждать, пока прокси выйдет в сеть с новым IP
+    "rpa_parallel": 3,
+    "captcha_provider": "2captcha",  # 2captcha | capsolver
+    "captcha_key": "",
+    "tg_token": "",  # бот Telegram для уведомлений
+    "tg_chat": "",
+    "tg_events": ["task_error", "scenario_error", "check_fail", "ban", "engine"],  # сколько профилей сценарий выполняет одновременно
 }
 
 _data: dict = {}

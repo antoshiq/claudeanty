@@ -3,7 +3,7 @@
 import asyncio
 import random
 
-from . import db, settings
+from . import db, human, settings
 
 DEFAULT_SITES = [
     "https://www.google.com", "https://www.youtube.com", "https://www.wikipedia.org", "https://www.amazon.com",
@@ -45,13 +45,7 @@ async def warmup(manager, pid: int, progress=None) -> dict:
                     visited += 1
                     if progress:
                         progress(f"#{pid}: {visited}/{count} {url}")
-                    end = asyncio.get_running_loop().time() + random.uniform(dwell * 0.6, dwell * 1.4)
-                    while asyncio.get_running_loop().time() < end:
-                        vp = page.viewport_size or {"width": 1200, "height": 700}
-                        await page.mouse.move(random.uniform(50, vp["width"] - 50), random.uniform(80, vp["height"] - 50),
-                                              steps=random.randint(5, 15))
-                        await page.mouse.wheel(0, random.choice([1, 1, 1, -1]) * random.uniform(200, 800))
-                        await asyncio.sleep(random.uniform(0.8, 2.5))
+                    await human.wander(page, random.uniform(dwell * 0.6, dwell * 1.4))
                 except Exception:  # noqa: BLE001
                     continue
             cookies = len(await sess.context.cookies())

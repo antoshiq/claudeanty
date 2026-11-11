@@ -7,7 +7,7 @@ import time
 from typing import Optional
 
 from . import cookies as ck
-from . import db
+from . import db, settings
 from .config import PROFILES_DIR
 from .engines.base import RunningSession
 from .engines.camoufox_engine import CamoufoxEngine, make_camoufox_fingerprint
@@ -30,6 +30,8 @@ class Manager:
         from .scheduler import Scheduler
         self.sync = Synchronizer(self)
         self.scheduler = Scheduler(self)  # стартует из run.py: работает, пока открыто приложение
+        from .recorder import Recorder
+        self.recorder = Recorder(self)
         threading.Thread(target=self.loop.run_forever, daemon=True, name="browser-loop").start()
 
     # ---- вызов из любого потока ----
@@ -80,14 +82,14 @@ class Manager:
             return
         if proxy:
             if not proxy.timezone:
-                await check_proxy(proxy)
+                await check_proxy(proxy, deep=False)
                 db.save_proxy(proxy)
             src = proxy
         else:
             # без прокси сайты видят ваш настоящий IP — гео берём по нему (кэш 10 минут)
             if not self._direct_geo or time.time() - self._direct_geo[0] > 600:
                 direct = Proxy(type="http", host="direct", port=0)
-                await check_proxy(direct, direct=True)
+                await check_proxy(direct, direct=True, deep=False)
                 self._direct_geo = (time.time(), direct)
             src = self._direct_geo[1]
         if src.timezone:
@@ -107,15 +109,30 @@ class Manager:
         self._starting.add(pid)
         try:
             proxy = db.get_proxy(p.proxy_id)
+            if proxy and proxy.change_ip_url and settings.get("change_ip_on_start"):
+                await self._rotate(pid, proxy)
             await self._resolve_geo(p, proxy)
             udd = PROFILES_DIR / str(pid)
             udd.mkdir(parents=True, exist_ok=True)
             sess = await self._engines[p.engine].start(p, proxy, str(udd), headless=headless)
+            sess.headless = headless
             self.sessions[pid] = sess
             sess.context.on("close", lambda *_: self.sessions.pop(pid, None))
             return sess
         finally:
             self._starting.discard(pid)
+
+    async def _rotate(self, pid: int, proxy: Proxy):
+        from .proxy.rotate import busy_with, change_ip
+        others = busy_with(proxy.id, self.sessions, pid)
+        if others:
+            self.scheduler.say(f"#{pid}: IP прокси не меняю — им пользуются запущенные профили "
+                               + ", ".join(f"#{o}" for o in others))
+            return
+        res = await change_ip(proxy, self.scheduler.say)
+        self.scheduler.say(f"#{pid}: {res['message']}")
+        if res.get("ok") and res.get("new") != res.get("old"):
+            proxy.timezone = ""  # гео заново определится по новому IP
 
     async def stop(self, pid: int):
         sess = self.sessions.pop(pid, None)

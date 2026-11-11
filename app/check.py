@@ -4,11 +4,13 @@
 которая собирает данные в странице и в Web Worker, WebRTC-адреса, таймзону и т.п.
 Дальше Python сравнивает всё между собой и с IP прокси и выдаёт список проверок.
 """
+import json
 import time
 from pathlib import Path
 
 from . import db
 from .proxy.checker import locale_for
+from .engines.base import evaluate_main
 
 URL = "https://check.claudeanty.test/"
 FRAME_URL = "https://frame.claudeanty-other.test/"  # другой сайт -> iframe в отдельном процессе (OOPIF)
@@ -144,6 +146,9 @@ async def run_check(manager, pid: int) -> dict:
     sess = manager.sessions[pid] if was_running else await manager.start(pid, headless=True)
     ctx = sess.context
     items: list[tuple[str, str, str]] = []  # (ok|warn|fail, проверка, подробности)
+    hashes: dict = {}
+    mode = "headless" if getattr(sess, "headless", False) else "window"
+    chrome = manager.chrome_version if p.engine == "chromium" else p.engine
 
     def add(ok, title, detail=""):
         items.append(("ok" if ok is True else ok if isinstance(ok, str) else "fail", title, detail))
@@ -153,20 +158,52 @@ async def run_check(manager, pid: int) -> dict:
         await ctx.route(FRAME_URL + "**", lambda r: r.fulfill(body=FRAME_PAGE, content_type="text/html; charset=utf-8"))
         page = await ctx.new_page()
         await page.goto(URL, timeout=30000)
-        d = await page.evaluate("collect()")
-        det = await page.evaluate("__caDetect()")
+        d = await evaluate_main(page, "collect()")
+        det = await evaluate_main(page, "__caDetect()")
+        from . import stability
+        try:
+            hashes = await evaluate_main(page, stability.JS)
+        except Exception:  # noqa: BLE001
+            hashes = {}
         await page.close()
         await ctx.unroute(URL + "**")
         await ctx.unroute(FRAME_URL + "**")
 
-        ip = {}
+        # Внешний IP и TLS — запросом из самого браузера: ctx.request Playwright ходит в сеть из Node напрямую,
+        # мимо --proxy-server браузера, и показал бы настоящий IP вместо IP прокси.
+        ip, tls = {}, {}
+        probe = await ctx.new_page()
         try:
-            r = await ctx.request.get("http://ip-api.com/json/?fields=status,query,countryCode,timezone", timeout=15000)
-            ip = await r.json()
-        except Exception as e:  # noqa: BLE001
-            add("warn", "Внешний IP", f"не удалось определить: {e}")
+            # ip-api.com бесплатно работает только по http, а Chrome переводит адреса на https — берём geojs.io
+            for url, key in (("https://get.geojs.io/v1/ip/geo.json", "ip"), ("https://tls.browserleaks.com/json", "tls")):
+                try:
+                    await probe.goto(url, wait_until="domcontentloaded", timeout=20000)
+                    data = json.loads(await probe.evaluate("document.body.innerText"))
+                    if key == "ip":
+                        ip.update({"status": "success", "query": data["ip"], "countryCode": data.get("country_code", ""),
+                                   "timezone": data.get("timezone", "")})
+                    else:
+                        tls.update(data)
+                except Exception as e:  # noqa: BLE001
+                    if key == "ip":
+                        add("warn", "Внешний IP", f"не удалось определить: {str(e).splitlines()[0][:120]}")
+        finally:
+            await probe.close()
         if ip.get("status") == "success":
             add(True, "Внешний IP", f"{ip['query']} ({ip['countryCode']})")
+        if tls.get("ja4") and p.engine == "chromium":
+            ja4 = tls["ja4"]
+            # у Chrome: TLS 1.3, SNI, 15–16 шифров, ALPN h2. Иначе TLS подменяет прокси (MITM) или это не Chrome
+            ok_tls = ja4.startswith("t13d") and ja4.split("_")[0].endswith("h2")
+            add(ok_tls, "TLS-отпечаток как у Chrome", f"JA4 {ja4}" + ("" if ok_tls else " — прокси расшифровывает трафик (MITM)?"))
+        proxy = db.get_proxy(p.proxy_id)
+        if proxy and proxy.tcp_os:
+            from .proxy.checker import os_matches
+            prof_os = "android" if p.kind == "mobile" else p.os
+            mt = os_matches(prof_os, proxy.tcp_os)
+            add(True if mt else "warn", "ОС прокси по TCP/IP совпадает с профилем",
+                f"прокси: {proxy.tcp_os}" + (f", MTU {proxy.mtu}" if proxy.mtu else "") +
+                ("" if mt else " — сайты с анализом сетевого стека видят другую ОС; возьмите прокси на той же ОС"))
 
         m, w = d["main"], d.get("worker")
         # 1. версия Chrome = движок
@@ -239,7 +276,11 @@ async def run_check(manager, pid: int) -> dict:
             missing = [k for k in need if codecs.get(k) != "probably"]
             add(not missing, "Медиакодеки как у Chrome",
                 ", ".join(f"{k}: {codecs.get(k) or 'нет'}" for k in codecs) if missing else "H.264, AAC, HEVC, VP9, AV1 — есть")
-        # 12. детекты JS-подмены и автоматизации (как в CreepJS)
+        # 12. стабильность между запусками
+        if hashes:
+            st, detail = stability.compare(p.fp_history, hashes, mode, chrome)
+            add(st, "Отпечаток стабилен между запусками", detail)
+        # 13. детекты JS-подмены и автоматизации (как в CreepJS)
         for key, title in DETECT_TITLES.items():
             if key in det and (p.engine == "chromium" or key in ("cdp_runtime", "no_artifacts", "iframe_consistent")):
                 add(det[key]["ok"], title, det[key]["detail"])
@@ -253,7 +294,14 @@ async def run_check(manager, pid: int) -> dict:
     p = db.get_profile(pid)
     if p:
         p.last_check = result
+        if hashes:
+            from . import stability
+            p.fp_history = stability.record(p.fp_history, hashes, mode, chrome)
         db.save_profile(p)
+        if result["fail"]:
+            from .notify import notify
+            notify("check_fail", f"Профиль #{pid} {p.name}: проблем {result['fail']}\n" + "\n".join(
+                f"✗ {t} — {d}" for s, t, d in items if s == "fail"))
     return result
 
 
@@ -265,6 +313,29 @@ async def open_check_sites(manager, pid: int):
             await page.goto(url, wait_until="commit", timeout=30000)
         except Exception:  # noqa: BLE001
             pass
+
+
+async def stability_test(manager, pid: int, runs: int = 2) -> dict:
+    """Несколько запусков подряд без окна и сравнение хэшей отпечатка между ними."""
+    from . import stability
+    if manager.is_running(pid):
+        raise RuntimeError("остановите профиль: для проверки он запускается заново несколько раз")
+    snaps = []
+    for _ in range(runs):
+        sess = await manager.start(pid, headless=True)
+        try:
+            await sess.context.route(URL + "**", lambda r: r.fulfill(body="<!doctype html><body></body>",
+                                                                     content_type="text/html"))
+            page = await sess.context.new_page()
+            await page.goto(URL)
+            snaps.append(await evaluate_main(page, stability.JS))
+        finally:
+            await manager.stop(pid)
+    first = snaps[0]
+    diff = sorted({k for s in snaps[1:] for k in stability.PARTS if s.get(k) != first.get(k)})
+    errors = sorted({k for s in snaps for k, v in s.items() if v == "error"})
+    return {"runs": runs, "changed": diff, "errors": errors,
+            "parts": {k: stability.PARTS[k] for k in stability.PARTS}}
 
 
 def format_report(r: dict) -> str:

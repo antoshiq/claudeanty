@@ -92,7 +92,8 @@ class ProfileForm(QWidget):
         self.proxy.addItem("Без прокси", None)
         for px in db.list_proxies():
             mark = {"ok": "✓ ", "fail": "✗ "}.get(px.status, "")
-            self.proxy.addItem(f"{mark}{px.type}://{px.host}:{px.port}  {px.country}".strip(), px.id)
+            extra = f"  · {px.tcp_os}" if px.tcp_os else ""
+            self.proxy.addItem(f"{mark}{px.type}://{px.host}:{px.port}  {px.country}{extra}".strip(), px.id)
         self.status = QComboBox()
         for key, (label, color) in STATUSES.items():
             self.status.addItem(_dot(color), label, key)
@@ -111,6 +112,10 @@ class ProfileForm(QWidget):
         f.addRow(_label("ОС"), self.os)
         f.addRow(_label("Устройство"), self.device)
         f.addRow(_label("Прокси"), self.proxy)
+        self.proxy_warn = _hint()
+        self.proxy_warn.setObjectName("modalError")
+        f.addRow("", self.proxy_warn)
+        self.proxy.currentIndexChanged.connect(lambda _: self._proxy_check())
         f.addRow(_label("Метка"), self.status)
         f.addRow(_label("Папка"), self.folder)
         f.addRow(_label("Теги"), self.tags)
@@ -273,6 +278,7 @@ class ProfileForm(QWidget):
         if mobile and self.engine.currentData() != "chromium":
             self.engine.setCurrentIndex(0)
         self.mobile_info.setVisible(mobile)
+        self._proxy_check()
         # тип/ОС/устройство поменялись — нужен новый отпечаток
         same = self.profile and self._identity() == getattr(self, "_orig_identity", None)
         if not self.fp or (not initial and not same):
@@ -280,6 +286,16 @@ class ProfileForm(QWidget):
         elif same and self.profile:
             self.fp = dict(self.profile.fingerprint)
         self._fill_fp_fields()
+
+    def _proxy_check(self):
+        from ..proxy.checker import os_warning
+        if not hasattr(self, "proxy_warn"):
+            return
+        px = db.get_proxy(self.proxy.currentData())
+        _, _, os_name, _ = self._identity()
+        warn = os_warning(os_name, px)
+        self.proxy_warn.setText(warn)
+        self.proxy_warn.setVisible(bool(warn))
 
     def _regenerate(self):
         kind, _, os_name, device = self._identity()

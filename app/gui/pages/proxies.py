@@ -6,15 +6,15 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QFrame, QHBoxLayout
 from ... import db, settings
 from ...manager import manager
 from ...models import Proxy
-from ...proxy.checker import check_proxy
+from ...proxy.checker import IP_TYPES, check_proxy
 from ..icons import icon
 from ..modal import Modal, confirm
 from ..theme import C
 from ..widgets import empty_label, set_icon, fill_list, section, side_list, side_title, tool
 from ..workers import run_bg
 
-COLS = ["#", "Тип", "Адрес", "Логин", "Внешний IP", "Страна", "Таймзона", "Профилей", "Статус"]
-WIDTHS = (44, 70, 0, 110, 130, 70, 150, 80, 120)
+COLS = ["#", "Тип", "Адрес", "Логин", "Внешний IP", "Страна", "Таймзона", "Тип IP", "ОС (TCP)", "Профилей", "Статус"]
+WIDTHS = (44, 70, 0, 100, 120, 60, 140, 110, 150, 75, 120)
 STATUS = {"ok": ("✓  Работает", "green"), "fail": ("✗  Ошибка", "red"), "": ("—  Не проверен", "faint")}
 
 
@@ -35,10 +35,11 @@ class ProxiesSidebar(QFrame):
         self.countries = side_list()
         self.status.itemClicked.connect(lambda it: self._pick("status", it))
         self.countries.itemClicked.connect(lambda it: self._pick("country", it))
-        v.addWidget(section("СОСТОЯНИЕ"))
+        v.addWidget(section("СОСТОЯНИЕ", self.status, "proxies.status"))
         v.addWidget(self.status, 2)
-        v.addWidget(section("СТРАНЫ"))
+        v.addWidget(section("СТРАНЫ", self.countries, "proxies.countries"))
         v.addWidget(self.countries, 3)
+        v.addStretch(0)  # забирает место, когда все разделы свёрнуты
 
     def _pick(self, kind, item):
         val = item.data(Qt.UserRole)
@@ -154,17 +155,25 @@ class ProxiesPage(QWidget):
             text, color = STATUS.get(p.status, STATUS[""])
             if p.id in self.checking:
                 text, color = "…  Проверка", "muted"
-            vals = [str(p.id), p.type.upper(), f"{p.host}:{p.port}", p.username or "—", p.ip or "—",
-                    p.country or "—", p.timezone or "—", str(usage.get(p.id, 0)), text]
+            vals = [str(p.id), p.type.upper(), f"{p.host}:{p.port}" + ("  ⟳" if p.change_ip_url else ""), p.username or "—",
+                    p.ip or "—",
+                    p.country or "—", p.timezone or "—", IP_TYPES.get(p.ip_type, "—"),
+                    (p.tcp_os or "—") + (f" · MTU {p.mtu}" if p.mtu and p.mtu != 1500 else ""),
+                    str(usage.get(p.id, 0)), text]
             for c, val in enumerate(vals):
                 item = QTableWidgetItem(val)
                 if c == 0:
                     item.setForeground(QColor(C["faint"]))
-                elif c == 8:
+                elif c == 10:
                     item.setForeground(QColor(C[color]))
                     if p.error:
                         item.setToolTip(p.error)
-                elif c in (3, 6, 7):
+                elif c == 7 and p.ip_type in ("hosting", "proxy"):
+                    item.setForeground(QColor(C["red"]))
+                    item.setToolTip("IP дата-центра или известного прокси — антифрод относится к таким строже")
+                elif c == 8 and p.tcp_os:
+                    item.setToolTip("ОС выходного узла по TCP/IP-отпечатку. Должна совпадать с ОС профилей на этом прокси.")
+                elif c in (3, 6, 9):
                     item.setForeground(QColor(C["muted"]))
                 self.table.setItem(r, c, item)
             if p.id in sel:
@@ -186,6 +195,8 @@ class ProxiesPage(QWidget):
             return
         m = QMenu(self)
         for ico, text, fn in (("shield", "Проверить", self.check_selected), ("copy", "Копировать адрес", self.copy_selected),
+                              (None, None, None), ("refresh", "Сменить IP сейчас", self.change_ip_selected),
+                              ("edit", "Ссылка смены IP…", self.set_change_url),
                               (None, None, None), ("trash", "Удалить\tDel", self.delete_selected)):
             if ico is None:
                 m.addSeparator()
@@ -202,7 +213,8 @@ class ProxiesPage(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
         hint = QLabel("По одному прокси в строке. Поддерживаются форматы:\n"
-                      "type://user:pass@host:port   ·   host:port   ·   host:port:user:pass")
+                      "type://user:pass@host:port   ·   host:port   ·   host:port:user:pass\n"
+                      "Мобильный прокси со ссылкой смены IP:   прокси | https://провайдер/changeip?key=…")
         hint.setObjectName("hint")
         text = QPlainTextEdit()
         text.setPlaceholderText("socks5://user:pass@1.2.3.4:1080\nhttp://5.6.7.8:3128")
@@ -297,3 +309,56 @@ class ProxiesPage(QWidget):
             db.delete_proxy(pid)
         self.win.log(f"Удалено прокси: {len(ids)}")
         self.refresh()
+
+    # ---------- смена IP мобильного прокси ----------
+    def set_change_url(self):
+        from PySide6.QtWidgets import QLineEdit
+        ids = self.selected_ids()
+        if not ids:
+            return
+        first = db.get_proxy(ids[0])
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        url = QLineEdit(first.change_ip_url if first else "")
+        url.setPlaceholderText("https://провайдер/api/changeip?key=…  (пусто — убрать)")
+        hint = QLabel(f"Прокси: {len(ids)}. Ссылку даёт провайдер мобильных прокси. Перед запуском профиля "
+                      "claudeAnty откроет её, дождётся нового IP и заново определит гео. Если прокси уже использует "
+                      "другой запущенный профиль, IP не меняется. Включается в Настройки → Прокси.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        lay.addWidget(url)
+        lay.addWidget(hint)
+
+        def validate():
+            u = url.text().strip()
+            return None if not u or u.startswith(("http://", "https://")) else "Ссылка должна начинаться с http:// или https://"
+
+        if not Modal(self.win, "Ссылка смены IP", w, ok_text="Сохранить", width=560, validate=validate).exec():
+            return
+        for pid in ids:
+            p = db.get_proxy(pid)
+            if p:
+                p.change_ip_url = url.text().strip()
+                db.save_proxy(p)
+        self.win.log(f"Ссылка смены IP сохранена для прокси: {len(ids)}")
+        self.refresh()
+
+    def change_ip_selected(self):
+        from ...proxy.rotate import change_ip
+        ids = [i for i in self.selected_ids() if (db.get_proxy(i) or Proxy(host="", port=0)).change_ip_url]
+        if not ids:
+            self.win.log("У выбранных прокси нет ссылки смены IP — задайте её в меню «Ссылка смены IP…»")
+            return
+
+        def job():
+            out = []
+            for pid in ids:
+                p = db.get_proxy(pid)
+                out.append(f"{p.host}:{p.port} — " + manager.run(change_ip(p, manager.scheduler.say), timeout=120)["message"])
+            return out
+
+        self.win.log(f"Смена IP прокси: {len(ids)}…")
+        run_bg(job, lambda r, e: (self.win.log(f"Ошибка смены IP: {e}") if e else [self.win.log(x) for x in r],
+                                  self.refresh()), self)

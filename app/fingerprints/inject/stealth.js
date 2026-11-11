@@ -10,11 +10,18 @@
   const nativeToString = Function.prototype.toString;
   const masked = new WeakMap();
   const sig = (name) => `function ${name}() { [native code] }`;
-  const clean = (e) => {
-    try {
-      if (e && typeof e.stack === "string" && e.stack.includes(TOKEN))
-        e.stack = e.stack.split("\n").filter(l => !l.includes(TOKEN)).join("\n");
-    } catch (x) {}
+  // Ошибка из нативной функции, вызванной нашей обёрткой, несёт в стеке кадры обёртки — их видно через
+  // Error.prepareStackTrace (структурные кадры). Поэтому стек пересобирается с точки вызова обёртки
+  // (Error.captureStackTrace(e, обёртка) отбрасывает её и всё внутри). Сам e.stack НЕ читаем: чтение
+  // вызвало бы prepareStackTrace страницы с нашими кадрами. Ошибки, брошенные кодом страницы
+  // (например, из valueOf аргумента), не трогаем — их стек должен остаться как есть.
+  const captureStack = Error.captureStackTrace;
+  const ownError = (e) => { try { return e instanceof TypeError && /Illegal invocation|requires that 'this'/.test(e.message); }
+                            catch (x) { return false; } };
+  const clean = (e, fn, always) => {
+    if ((always || ownError(e)) && e !== null && typeof e === "object") {
+      try { captureStack(e, fn); } catch (x) {}
+    }
     return e;
   };
   // Каждый JS-контекст (страница, каждый iframe) получает свою копию скрипта со своим списком masked.
@@ -32,20 +39,20 @@
         }
       } catch (e) {}
     }
-    try { return nativeToString.call(this); } catch (e) { throw clean(e); }
+    try { return nativeToString.call(this); } catch (e) { throw clean(e, fnToString); }
   } }.toString;
   masked.set(fnToString, sig("toString"));
   Object.defineProperty(Function.prototype, "toString", { value: fnToString, writable: true, enumerable: false, configurable: true });
 
   // метод как у браузера: shorthand-метод (нет prototype, TypeError при new), нужные name и length
   const native = (name, length, impl) => {
-    const f = { [name](...args) { try { return impl.call(this, args); } catch (e) { throw clean(e); } } }[name];
+    const f = { [name](...args) { try { return impl.call(this, args); } catch (e) { throw clean(e, f); } } }[name];
     Object.defineProperty(f, "length", { value: length });
     masked.set(f, sig(name));
     return f;
   };
   const getter = (prop, impl) => {
-    const g = Object.getOwnPropertyDescriptor({ get [prop]() { try { return impl.call(this); } catch (e) { throw clean(e); } } }, prop).get;
+    const g = Object.getOwnPropertyDescriptor({ get [prop]() { try { return impl.call(this); } catch (e) { throw clean(e, g, true); } } }, prop).get;
     masked.set(g, sig("get " + prop));
     return g;
   };
@@ -89,8 +96,10 @@
     if (!C) continue;
     defMethod(C.prototype, "getParameter", function (orig, args) {
       const p = args[0];
-      if (p === 37445) { orig.apply(this, args); return FP.webgl.vendor; }    // UNMASKED_VENDOR_WEBGL
-      if (p === 37446) { orig.apply(this, args); return FP.webgl.renderer; }  // UNMASKED_RENDERER_WEBGL
+      // UNMASKED_VENDOR/RENDERER_WEBGL: без включённого расширения WEBGL_debug_renderer_info настоящий Chrome
+      // отдаёт null (и ставит INVALID_ENUM) — подменяем только то, что браузер действительно вернул бы
+      if (p === 37445) { const r = orig.apply(this, args); return r === null ? r : FP.webgl.vendor; }
+      if (p === 37446) { const r = orig.apply(this, args); return r === null ? r : FP.webgl.renderer; }
       const real = orig.apply(this, args);  // сначала нативный вызов: та же проверка this и те же ошибки
       return GLP[p] !== undefined ? glValue(GLP[p]) : real;
     });
@@ -153,41 +162,88 @@
     defMethod(AudioBuffer.prototype, "copyFromChannel", function (orig, args) { origGCD.call(this, 0); ensure(this); return orig.apply(this, args); });
   }
 
-  // ---------- шрифты: скрываем те, которых нет в выбранной ОС ----------
+  // ---------- шрифты: скрываем чужие для ОС профиля, подменяем отсутствующие на ПК ----------
+  // hidden — шрифт не из списка ОС профиля (например, Segoe UI у macOS-профиля): «его нет».
+  // alias — шрифт ОС профиля, которого нет на этом ПК (Helvetica Neue): «он есть», замеры и рисование —
+  // похожим установленным шрифтом (Arial). document.fonts.check() НЕ трогаем: настоящий Chrome для
+  // системных шрифтов всегда отвечает true, и любая другая логика была бы отличием от него.
   if (FP.fonts && FP.fonts.length) {
     const ALLOWED = new Set(FP.fonts.map(f => f.toLowerCase()));
+    const KNOWN = new Set((FP.font_known || []).map(f => f.toLowerCase()));
+    const ALIAS = new Map(Object.entries(FP.font_alias || {}).map(([k, v]) => [k.toLowerCase(), v]));
     const GENERIC = new Set(["serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui", "ui-serif",
       "ui-sans-serif", "ui-monospace", "ui-rounded", "emoji", "math", "fangsong", "inherit", "initial", "unset", "-apple-system"]);
-    const split = (ff) => ff.split(",").map(s => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
+    const unq = (s) => String(s || "").trim().replace(/^["']|["']$/g, "");
+    const split = (ff) => ff.split(",").map(unq).filter(Boolean);
     const hidden = (n) => { n = n.toLowerCase(); return !GENERIC.has(n) && !ALLOWED.has(n); };
-    const fallback = (ff) => { const rest = split(ff).filter(f => !hidden(f));
-      return rest.length ? rest.map(f => GENERIC.has(f.toLowerCase()) ? f : `"${f}"`).join(", ") : "monospace"; };
+    const aliasOf = (n) => ALIAS.get(String(n).toLowerCase());
+    const quote = (f) => GENERIC.has(f.toLowerCase()) ? f : `"${f}"`;
+    // список шрифтов, каким его «видит» профиль: скрытые убраны, отсутствующие заменены псевдонимами
+    // Скрытый шрифт заменяется НЕсуществующим именем, а не выбрасывается: тогда Chrome делает ровно тот откат,
+    // что и для отсутствующего шрифта (следующий в списке или шрифт по умолчанию). Подстановка «monospace»
+    // давала другой рендер, чем у настоящего браузера (pixelscan рисует «no-real-font-123» и сравнивает).
+    const NOFONT = `"${TOKEN}-nf"`;
+    const fix = (ff) => split(ff).map(f => hidden(f) ? NOFONT : quote(aliasOf(f) || f)).join(", ");
+    const needsFix = (ff) => { const first = split(ff)[0]; return !!first && (hidden(first) || !!aliasOf(first)); };
     const viaFallback = (el, read) => {
-      const st = el.style, ff = st && st.fontFamily;
-      if (ff) { const first = split(ff)[0]; if (first && hidden(first)) {
-        const saved = st.fontFamily; st.fontFamily = fallback(ff);
-        try { return read(); } finally { st.fontFamily = saved; } } }
+      const st = el && el.style, ff = st && st.fontFamily;
+      if (ff && needsFix(ff)) {
+        const saved = st.fontFamily; st.fontFamily = fix(ff);
+        try { return read(); } finally { st.fontFamily = saved; }
+      }
       return read();
     };
     for (const [proto, props] of [[HTMLElement.prototype, ["offsetWidth", "offsetHeight"]],
                                   [Element.prototype, ["scrollWidth", "scrollHeight", "clientWidth", "clientHeight"]]])
       for (const prop of props) defGet(proto, prop, function (orig) { return viaFallback(this, () => orig.call(this)); });
-    defMethod(Element.prototype, "getBoundingClientRect", function (orig, args) { return viaFallback(this, () => orig.apply(this, args)); });
+    for (const m of ["getBoundingClientRect", "getClientRects"])
+      defMethod(Element.prototype, m, function (orig, args) { return viaFallback(this, () => orig.apply(this, args)); });
+    // Range: шрифт берём у ближайшего элемента со своим font-family
+    const rangeEl = (r) => { let n = r.commonAncestorContainer; if (n && n.nodeType !== 1) n = n.parentElement;
+      while (n && n.nodeType === 1 && !(n.style && n.style.fontFamily)) n = n.parentElement; return n; };
+    for (const m of ["getBoundingClientRect", "getClientRects"])
+      if (window.Range) defMethod(Range.prototype, m, function (orig, args) { return viaFallback(rangeEl(this), () => orig.apply(this, args)); });
 
     const FONT_RE = /^(.*?\d+(?:\.\d+)?(?:px|pt|em|rem|%|vh|vw)(?:\s*\/\s*\S+)?\s+)(.+)$/;
-    defMethod(CanvasRenderingContext2D.prototype, "measureText", function (orig, args) {
+    const withFont = (orig) => function (o, args) {
       const m = FONT_RE.exec(this.font || "");
-      if (m && hidden(split(m[2])[0] || "")) {
-        const saved = this.font; this.font = m[1] + fallback(m[2]);
-        try { return orig.apply(this, args); } finally { this.font = saved; }
+      if (m && needsFix(m[2])) {
+        const saved = this.font; this.font = m[1] + fix(m[2]);
+        try { return o.apply(this, args); } finally { this.font = saved; }
       }
-      return orig.apply(this, args);
-    });
-    if (window.FontFaceSet) defMethod(FontFaceSet.prototype, "check", function (orig, args) {
-      const res = orig.apply(this, args);
-      const m = FONT_RE.exec(args[0] || "");
-      return (m && split(m[2]).every(hidden)) ? false : res;
-    });
+      return o.apply(this, args);
+    };
+    for (const C of [window.CanvasRenderingContext2D, window.OffscreenCanvasRenderingContext2D])
+      // только measureText: перехват fillText/strokeText распознают (pixelscan зависает на «Collecting Data»),
+      // поэтому рисование текста идёт как есть — скрытый шрифт ПК теоретически виден по пикселям canvas
+      if (C) for (const m of ["measureText"]) defMethod(C.prototype, m, withFont());
+
+    // FontFace(name, local(name)).load(): чужой системный шрифт — «нет», шрифт ОС профиля — «есть»
+    if (window.FontFace) {
+      const fake = new WeakMap();  // face -> { status, promise }
+      defMethod(FontFace.prototype, "load", function (orig, args) {
+        const known = fake.get(this);
+        if (known) return known.promise;
+        const fam = unq(this.family);
+        if (hidden(fam) && KNOWN.has(fam.toLowerCase())) {
+          const entry = { status: "error", promise: Promise.reject(new DOMException("A network error occurred.", "NetworkError")) };
+          fake.set(this, entry);
+          return entry.promise;
+        }
+        const alias = aliasOf(fam);
+        if (!alias) return orig.apply(this, args);
+        const self = this, entry = { status: "loading" };
+        fake.set(this, entry);
+        entry.promise = orig.apply(this, args).then(r => { fake.delete(self); return r; }, () => {
+          const sub = new FontFace(fam, `local("${alias}")`);
+          return orig.call(sub).then(() => { entry.status = "loaded"; return self; },
+                                     e => { entry.status = "error"; throw e; });
+        });
+        return entry.promise;
+      });
+      defGet(FontFace.prototype, "status", function (g, real) { const f = fake.get(this); return f ? f.status : real; });
+      defGet(FontFace.prototype, "loaded", function (g, real) { const f = fake.get(this); return f ? f.promise : real; });
+    }
     if (window.queryLocalFonts) defMethod(window, "queryLocalFonts", function () {
       return Promise.reject(new DOMException("Permission denied.", "NotAllowedError"));
     });

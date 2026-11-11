@@ -50,7 +50,7 @@ class SettingsPage(QWidget):
     SECTIONS = [("engine", "Движок", "shield"), ("profiles", "Новые профили", "users"), ("browser", "Поведение", "monitor"),
                 ("proxies", "Прокси", "globe"), ("warmup", "Прогрев cookies", "flame"), ("rpa", "Сценарии", "workflow"),
                 ("ui", "Внешний вид", "layers"),
-                ("api", "Локальный API", "plug"), ("data", "Данные", "folder")]
+                ("api", "Локальный API", "plug"), ("notify", "Уведомления", "bell"), ("data", "Данные", "folder")]
 
     def __init__(self, win):
         super().__init__()
@@ -90,6 +90,17 @@ class SettingsPage(QWidget):
                           "Применяется к следующим запускам профилей.", "chrome_engine",
                           [("Google Chrome (установленный)" if chrome else "Google Chrome — не установлен", "chrome"),
                            ("Chrome for Testing (Playwright)", "chromium")], on_change=lambda _: self.check_engine())
+        try:
+            import patchright  # noqa: F401
+            have_pr = True
+        except ImportError:
+            have_pr = False
+        self._combo("engine", "Управление браузером",
+                    "Patchright — форк Playwright без следов автоматизации: не включает на страницах CDP-домены "
+                    "Runtime и Console, по которым сайты (fingerprint.com) видят «открытые DevTools». Playwright — "
+                    "обычный, запасной вариант. Применяется к следующим запускам профилей.", "automation_driver",
+                    [("Patchright (рекомендуется)" if have_pr else "Patchright — не установлен (pip install patchright)",
+                      "patchright"), ("Playwright", "playwright")])
         self.engine_state = QLabel("Проверка версии…")
         self.engine_state.setObjectName("settingDesc")
         self.engine_state.setWordWrap(True)
@@ -149,7 +160,16 @@ class SettingsPage(QWidget):
         # ---------- прокси ----------
         self._h("proxies")
         self._check("proxies", "Проверять после добавления",
-                    "Сразу проверять новые прокси и определять страну и таймзону.", "check_proxy_on_add")
+                    "Сразу проверять новые прокси: страна, таймзона, тип IP (резидентный, мобильный, хостинг) "
+                    "и ОС по TCP/IP-отпечатку.", "check_proxy_on_add")
+        self._check("proxies", "Менять IP мобильного прокси перед запуском",
+                    "Если у прокси задана ссылка смены IP (меню прокси → «Ссылка смены IP…»), она открывается перед "
+                    "запуском профиля. Не срабатывает, если прокси занят другим запущенным профилем.",
+                    "change_ip_on_start")
+        self._spin("proxies", "Смена IP не чаще, сек", "Пауза между сменами IP одного прокси (лимит провайдера).",
+                   "change_ip_cooldown", 0, 3600)
+        self._spin("proxies", "Ждать новый IP, сек", "Сколько ждать, пока модем переподключится.",
+                   "change_ip_wait", 5, 300)
 
         # ---------- прогрев ----------
         self._h("warmup")
@@ -176,6 +196,10 @@ class SettingsPage(QWidget):
         self._h("rpa")
         self._spin("rpa", "Профилей одновременно", "Сколько профилей сценарий выполняет параллельно; остальные ждут "
                    "очереди. Касается и запуска по расписанию.", "rpa_parallel", 1, 50)
+        self._combo("rpa", "Сервис капч", "Для шага «Решить капчу»: reCAPTCHA v2, hCaptcha, Cloudflare Turnstile.",
+                    "captcha_provider", [("2captcha", "2captcha"), ("CapSolver", "capsolver")])
+        self._secret("rpa", "Ключ сервиса капч", "API-ключ из личного кабинета 2captcha / CapSolver.", "captcha_key",
+                     check=("Проверить баланс", self._captcha_balance))
 
         # ---------- внешний вид ----------
         self._h("ui")
@@ -195,6 +219,29 @@ class SettingsPage(QWidget):
                     "api_enabled")
         self._spin("api", "Порт", f"Сейчас API работает на порту {API_PORT}. Новый порт применится после перезапуска.",
                    "api_port", 1024, 65535)
+
+        # ---------- уведомления ----------
+        self._h("notify")
+        self._secret("notify", "Токен бота Telegram", "Создайте бота у @BotFather и вставьте его токен. Затем напишите "
+                     "боту /start и нажмите «Определить chat id».", "tg_token",
+                     check=("Определить chat id", self._tg_detect))
+        self.tg_chat = self._secret("notify", "Chat id", "Куда отправлять: ваш чат с ботом, группа или канал "
+                                    "(бот должен быть их участником).", "tg_chat", check=("Отправить тест", self._tg_test))
+        from PySide6.QtWidgets import QCheckBox as _CB
+        from ...notify import EVENTS
+        ev_box = QWidget()
+        evl = QVBoxLayout(ev_box)
+        evl.setContentsMargins(0, 0, 0, 0)
+        evl.setSpacing(4)
+        chosen = set(settings.get("tg_events") or [])
+        self._tg_checks = {}
+        for k, title in EVENTS.items():
+            c = _CB(title)
+            c.setChecked(k in chosen)
+            c.toggled.connect(lambda _=False: self._saved("tg_events", [k for k, c in self._tg_checks.items() if c.isChecked()]))
+            self._tg_checks[k] = c
+            evl.addWidget(c)
+        self._row("notify", "О чём сообщать", "Уведомления приходят, пока открыт claudeAnty.", ev_box)
 
         # ---------- данные ----------
         self._h("data")
@@ -303,6 +350,51 @@ class SettingsPage(QWidget):
         sp.valueChanged.connect(lambda v: self._saved(key, v, on_change))
         self._row(sec, title, desc, sp)
         return sp
+
+    def _secret(self, sec, title, desc, key, check=None):
+        from PySide6.QtWidgets import QLineEdit
+        box = QWidget()
+        bl = QHBoxLayout(box)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(6)
+        ed = QLineEdit(settings.get(key) or "")
+        ed.setEchoMode(QLineEdit.Password)
+        ed.setMinimumWidth(360)
+        ed.editingFinished.connect(lambda: settings.get(key) != ed.text().strip() and self._saved(key, ed.text().strip()))
+        bl.addWidget(ed)
+        if check:
+            b = QPushButton(check[0])
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda: (self._saved(key, ed.text().strip()) if settings.get(key) != ed.text().strip() else None,
+                                       check[1]()))
+            bl.addWidget(b)
+        self._row(sec, title, desc, box)
+        return ed
+
+    def _tg_detect(self):
+        from ...notify import detect_chat
+        from ..workers import run_bg
+
+        def done(chat, e):
+            if e:
+                self.win.log(f"Telegram: {e}")
+                return
+            self.tg_chat.setText(chat)
+            self._saved("tg_chat", chat)
+
+        run_bg(lambda: detect_chat(settings.get("tg_token")), done, self)
+
+    def _tg_test(self):
+        from ...notify import send_test
+        from ..workers import run_bg
+        run_bg(send_test, lambda r, e: self.win.log(f"Telegram: {e or r}"), self)
+
+    def _captcha_balance(self):
+        from ...captcha import balance
+        from ...manager import manager
+        from ..workers import run_bg
+        run_bg(lambda: manager.run(balance()), lambda r, e: self.win.log(
+            f"Сервис капч: ошибка — {e}" if e else f"Баланс {settings.get('captcha_provider')}: {r:.2f} $"), self)
 
     def _accent_changed(self, _value):
         apply_theme(QApplication.instance())

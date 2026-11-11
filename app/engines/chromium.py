@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright as _playwright
 
 from ..fingerprints.generator import enrich
 from ..models import Profile, Proxy
@@ -27,6 +27,10 @@ def build_fp(profile: Profile) -> dict:
     fp = apply_version(enrich(profile.fingerprint), engine_version())
     fp["languages"] = [profile.locale, profile.locale.split("-")[0]]
     fp["webrtc"] = profile.webrtc
+    from ..fingerprints import fonts
+    os_name = "android" if profile.kind == "mobile" else profile.os
+    fp["font_alias"] = fonts.aliases(os_name)  # шрифты ОС профиля, которых нет на ПК -> похожий установленный
+    fp["font_known"] = fonts.known()
     return fp
 
 
@@ -151,6 +155,27 @@ async def load_extensions(ctx, paths: list[str]):
     await cdp.detach()
 
 
+def driver_name() -> str:
+    """Чем управлять Chrome: patchright (по умолчанию, если установлен) или playwright.
+    Patchright — форк Playwright без следов автоматизации: не включает CDP-домены Runtime и Console на
+    страницах (по ним сайты видят «открытые DevTools»), выполняет свой код в изолированных мирах."""
+    from .. import settings
+    if settings.get("automation_driver") == "patchright":
+        try:
+            import patchright  # noqa: F401
+            return "patchright"
+        except ImportError:
+            pass
+    return "playwright"
+
+
+def async_playwright():
+    if driver_name() == "patchright":
+        from patchright.async_api import async_playwright as pr
+        return pr()
+    return _playwright()
+
+
 class ChromiumEngine(Engine):
     name = "chromium"
 
@@ -242,7 +267,10 @@ class ChromiumEngine(Engine):
         # метка нашего скрипта: по ней подмена вырезает свои кадры из стека ошибок
         fp["token"] = "ca" + secrets.token_hex(6)
         fp_json = json.dumps(fp)
-        await ctx.add_init_script(_STEALTH.replace("__FP__", fp_json) + f"\n//# sourceURL={fp['token']}\n")
+        stealth = _STEALTH.replace("__FP__", fp_json) + f"\n//# sourceURL={fp['token']}\n"
+        # Скрипт подмены ставит наш CDP-клиент (Page.addScriptToEvaluateOnNewDocument в каждую страницу и iframe
+        # до запуска их кода), а не ctx.add_init_script: Patchright выполняет init-скрипты, перехватывая ВСЕ
+        # запросы и вставляя <script> в HTML с отключённым кэшем — fingerprint.com видит это как «Browser Tampering».
 
         ws = ""
         try:
@@ -252,7 +280,12 @@ class ChromiumEngine(Engine):
             pass
 
         if ws:
-            client = CDPClient(ws, page_commands(profile, fp), [("Network.setUserAgentOverride", ua_override(fp))],
+            # Page.enable нужен, чтобы Chrome выполнял скрипты этой сессии; сайту домен Page не виден
+            # (в отличие от Runtime, по которому и определяют автоматизацию)
+            cmds = page_commands(profile, fp) + [
+                ("Page.enable", {}),
+                ("Page.addScriptToEvaluateOnNewDocument", {"source": stealth, "runImmediately": True})]
+            client = CDPClient(ws, cmds, [("Network.setUserAgentOverride", ua_override(fp))],
                                _WORKER.replace("__FP__", fp_json) + f"\n//# sourceURL={fp['token']}\n")
             try:
                 await client.start()
@@ -263,6 +296,9 @@ class ChromiumEngine(Engine):
                 cleanups.insert(0, client.stop)
             except Exception as e:  # noqa: BLE001
                 log.warning("CDP client: %s", e)
+                ws = ""
+        if not ws:  # без своего CDP-клиента — хотя бы штатным способом драйвера
+            await ctx.add_init_script(stealth)
 
         sess = RunningSession(profile.id, self.name, ctx, ws_endpoint=ws, debug_port=debug_port, cleanups=cleanups)
         if not headless:

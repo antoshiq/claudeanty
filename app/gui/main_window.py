@@ -126,6 +126,9 @@ class MainWindow(QMainWindow):
         if st["level"] in ("warn", "info") and st["message"] != self._engine_warned:
             self._engine_warned = st["message"]
             self.log(("Внимание: " if warn else "") + st["message"])
+            if warn:
+                from ..notify import notify
+                notify("engine", st["message"])
 
     # ================= построение =================
     def _build_titlebar(self):

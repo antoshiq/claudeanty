@@ -15,13 +15,15 @@ from ..theme import C
 from ..widgets import empty_label, fill_list, set_icon, side_list, side_title, tool
 from ..workers import run_bg
 
-_GROUPS = [("Навигация", ["open", "new_tab"]), ("Действия", ["click", "type", "press", "scroll"]),
-           ("Ожидание", ["wait", "wait_for"]), ("Блоки", ["repeat", "if", "end"]), ("Прочее", ["screenshot"])]
+_GROUPS = [("Навигация", ["open", "new_tab"]), ("Действия", ["click", "type", "press", "scroll", "captcha"]),
+           ("Ожидание", ["wait", "wait_for"]), ("Данные", ["extract", "set"]), ("Блоки", ["repeat", "if", "end"]),
+           ("Прочее", ["screenshot"])]
 _STEP_ICONS = {"open": "globe", "new_tab": "plus", "click": "check", "type": "edit", "press": "key", "wait": "clock",
                "wait_for": "search", "scroll": "arrow_down", "repeat": "repeat", "if": "layers", "end": "chevron_up",
-               "screenshot": "download"}
-VARS_HINT = ("Подстановки в тексте: {{login}}, {{password}}, {{totp}} — из «Пароли и 2FA» профиля "
-             "({{password:Google}} — аккаунт Google), {{name}}, {{id}}, {{random:6}}.")
+               "screenshot": "download", "extract": "copy", "set": "tag", "captcha": "shield"}
+VARS_HINT = ("Подстановки: {{login}}, {{password}}, {{totp}} — из «Пароли и 2FA» профиля "
+             "({{password:Google}} — аккаунт Google), {{name}}, {{id}}, {{random:6}}, {{date}}, а также "
+             "{{колонка}} из «Данные (CSV)» и переменные из шагов «Извлечь» / «Задать».")
 
 
 def step_form(step: dict) -> tuple[QWidget, callable]:
@@ -147,6 +149,11 @@ class ScenariosPage(QWidget):
                 menu.addAction(a)
         self.add_btn.setMenu(menu)
         row.addWidget(self.add_btn)
+        self.rec_btn = QPushButton("  Записать")
+        self.rec_btn.setIcon(icon("play", C["red"], 12))
+        self.rec_btn.setToolTip("Записать шаги действиями в профиле: клики, ввод, прокрутка, переходы")
+        self.rec_btn.clicked.connect(self.toggle_record)
+        row.addWidget(self.rec_btn)
         for text, ico, fn in (("  Изменить", "edit", self.edit_step), ("", "copy", self.duplicate_step),
                               ("", "arrow_up", lambda: self.move_step(-1)), ("", "arrow_down", lambda: self.move_step(1)),
                               ("", "trash", self.delete_step)):
@@ -157,6 +164,11 @@ class ScenariosPage(QWidget):
             b.clicked.connect(fn)
             row.addWidget(b)
         row.addStretch()
+        self.data_btn = QPushButton("  Данные (CSV)")
+        set_icon(self.data_btn, "layers", "text", 14)
+        self.data_btn.setToolTip("Таблица данных: строка на профиль, колонки — переменные {{колонка}}")
+        self.data_btn.clicked.connect(self.edit_data)
+        row.addWidget(self.data_btn)
         ev.addLayout(row)
         self.problem = QLabel()
         self.problem.setObjectName("modalError")
@@ -204,6 +216,11 @@ class ScenariosPage(QWidget):
             self.current = None
         self.editor.setVisible(self.current is not None)
         self.empty.setVisible(self.current is None)
+        rec = manager.recorder.status()
+        self.rec_btn.setText(f"  Остановить запись ({rec['steps']})" if rec["active"] else "  Записать")
+        self.rec_btn.setIcon(icon("stop" if rec["active"] else "play", C["red"], 12))
+        rows = len(rpa.parse_data(self.current.get("data", ""))) if self.current else 0
+        self.data_btn.setText(f"  Данные (CSV): {rows}" if rows else "  Данные (CSV)")
         jobs = list(rpa.jobs.running.values())
         self.jobs_label.setText(" · ".join(f"«{j['name']}»: {j['done']}/{j['total']}" for j in jobs)
                                 if jobs else "Сейчас ничего не выполняется")
@@ -389,3 +406,99 @@ class ScenariosPage(QWidget):
     def stop_all(self):
         manager.loop.call_soon_threadsafe(rpa.jobs.stop_all)
         self.win.log("Сценарии останавливаются…")
+
+    # ---------- запись действиями ----------
+    def toggle_record(self):
+        if manager.recorder.active:
+            def done(steps, err):
+                if err:
+                    self.win.log(f"Ошибка записи: {err}")
+                    return
+                if not steps:
+                    self.win.log("Запись остановлена: действий не было")
+                    self.refresh()
+                    return
+                if not self.current:
+                    import time as _t
+                    self.current = db.save_doc("scenarios", {"name": f"Запись {_t.strftime('%d.%m %H:%M')}", "steps": []})
+                    self.name.setText(self.current["name"])
+                self.current.setdefault("steps", []).extend(steps)
+                self._save(len(self.current["steps"]) - 1)
+                self.win.log(f"Записано шагов: {len(steps)} — добавлены в сценарий «{self.current['name']}». "
+                             "Проверьте селекторы и паузы перед запуском на многих профилях.")
+            run_bg(lambda: manager.run(manager.recorder.stop()), done, self)
+            return
+        profiles = db.list_profiles()
+        if not profiles:
+            self.win.log("Сначала создайте профиль")
+            return
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        combo = QComboBox()
+        pre = self.win.pages["profiles"].selected_ids()
+        for p in profiles:
+            combo.addItem(f"{'●' if manager.is_running(p.id) else '○'}  #{p.id}  {p.name}", p.id)
+        if pre:
+            combo.setCurrentIndex(max(0, combo.findData(pre[0])))
+        hint = QLabel("Профиль откроется (если ещё не открыт). Работайте в нём как обычно — клики, ввод, Enter, "
+                      "прокрутка, переходы и паузы станут шагами сценария. Затем нажмите «Остановить запись».\n\n"
+                      "Пароли записываются как {{password}}, коды 2FA — как {{totp}}, логин аккаунта профиля — "
+                      "как {{login}}: в сценарии не остаётся секретов.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        lay.addWidget(combo)
+        lay.addWidget(hint)
+        if not Modal(self.win, "Запись сценария", w, ok_text="Начать запись", width=520).exec():
+            return
+        pid = combo.currentData()
+        self.win.log(f"Запись сценария в профиле #{pid}…")
+        run_bg(lambda: manager.run(manager.recorder.start(pid)),
+               lambda r, e: (self.win.log(f"Ошибка записи: {e}" if e else "Запись идёт — действуйте в окне профиля"),
+                             self.refresh()), self)
+
+    # ---------- таблица данных ----------
+    def edit_data(self):
+        from PySide6.QtWidgets import QPlainTextEdit
+        if not self.current:
+            return
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        text = QPlainTextEdit(self.current.get("data", ""))
+        text.setPlaceholderText("profile;email;comment\n1;first@mail.com;Привет\nМой профиль 2;second@mail.com;Здравствуйте")
+        text.setMinimumHeight(220)
+        load = QPushButton("  Загрузить из файла…")
+        set_icon(load, "upload", "text", 14)
+
+        def from_file():
+            from pathlib import Path
+            from PySide6.QtWidgets import QFileDialog
+            path, _ = QFileDialog.getOpenFileName(self, "CSV с данными", "", "CSV (*.csv *.txt);;Все (*)")
+            if path:
+                text.setPlainText(Path(path).read_text(encoding="utf-8-sig", errors="replace"))
+        load.clicked.connect(from_file)
+        hint = QLabel("Первая строка — названия колонок, разделитель «;», «,» или табуляция. Каждая строка достаётся "
+                      "одному профилю: по колонке profile (номер или название профиля), а без неё — по порядку "
+                      "запуска. В шагах используйте {{название_колонки}}. Извлечённые шагом «Извлечь» значения "
+                      "сохраняются в data/rpa_results.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        lay.addWidget(text)
+        lay.addWidget(load)
+        lay.addWidget(hint)
+
+        def validate():
+            try:
+                rows = rpa.parse_data(text.toPlainText())
+            except Exception as e:  # noqa: BLE001
+                return f"Не удалось разобрать: {e}"
+            return None if rows or not text.toPlainText().strip() else "Нет ни одной строки данных под заголовком"
+
+        if Modal(self.win, f"Данные сценария «{self.current.get('name')}»", w, ok_text="Сохранить", width=640,
+                 validate=validate).exec():
+            self.current["data"] = text.toPlainText().strip()
+            self._save()
+            self.win.log(f"Данные сценария: строк {len(rpa.parse_data(self.current['data']))}")

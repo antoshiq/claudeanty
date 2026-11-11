@@ -1,0 +1,23 @@
+{
+  "chrome_versions": ["128.0.0.0", "129.0.0.0", "130.0.0.0", "131.0.0.0"],
+  "screens": [[1920,1080],[1366,768],[1536,864],[1440,900],[2560,1440],[1600,900]],
+  "cores": [4, 6, 8, 12, 16],
+  "memory": [4, 8, 16],
+  "windows": {"platform": "Win32", "ua_os": "Windows NT 10.0; Win64; x64", "ch_platform": "Windows", "ch_platform_version": "15.0.0",
+    "gpus": [
+      ["Google Inc. (NVIDIA)", "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Direct3D11 vs_5_0 ps_5_0, D3D11)"],
+      ["Google Inc. (NVIDIA)", "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)"],
+      ["Google Inc. (Intel)", "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)"],
+      ["Google Inc. (AMD)", "ANGLE (AMD, AMD Radeon RX 580 Direct3D11 vs_5_0 ps_5_0, D3D11)"]
+    ]},
+  "macos": {"platform": "MacIntel", "ua_os": "Macintosh; Intel Mac OS X 10_15_7", "ch_platform": "macOS", "ch_platform_version": "14.5.0",
+    "gpus": [
+      ["Google Inc. (Apple)", "ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)"],
+      ["Google Inc. (Apple)", "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)"]
+    ]},
+  "linux": {"platform": "Linux x86_64", "ua_os": "X11; Linux x86_64", "ch_platform": "Linux", "ch_platform_version": "6.5.0",
+    "gpus": [
+      ["Google Inc. (NVIDIA Corporation)", "ANGLE (NVIDIA Corporation, NVIDIA GeForce GTX 1060/PCIe/SSE2, OpenGL 4.5.0)"],
+      ["Google Inc. (Intel)", "ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6)"]
+    ]}
+}

@@ -119,7 +119,7 @@ async def _creepjs(page, ctx) -> list[Item]:
 
 # ---------------- fingerprint.com ----------------
 _FPC_SIGNALS = [  # подпись, считать ли проблемой отпечатка (fail) или свойством IP/окружения (warn)
-    ("Bot", "fail"), ("Browser Tampering", "fail"), ("Virtual Machine", "warn"), ("Incognito Mode", "warn"),
+    ("Bot", "fail"), ("Browser Tampering", "warn"), ("Virtual Machine", "warn"), ("Incognito Mode", "warn"),
     ("Privacy Settings", "warn"), ("Developer Tools", "warn"), ("VPN", "warn"), ("Proxy Detection", "warn"),
     ("IP Blocklist", "warn"),
 ]
@@ -142,7 +142,11 @@ async def _fingerprint(page, ctx) -> list[Item]:
         good = val.lower().startswith("not detected")
         note = ""
         if not good and label == "Developer Tools":
-            note = " — так сайт видит управление через Playwright (CDP Runtime); в обычной ручной работе тоже"
+            note = (" — так сайт видит управление через Playwright (CDP Runtime). Включите Patchright: "
+                    "Настройки → Движок → Управление браузером")
+        elif not good and label == "Browser Tampering":
+            note = (" — на демо-странице этот сигнал нестабилен: при частых проверках с одного IP он появляется "
+                    "и у Chrome совсем без подмен. Смотрите на него в сумме с pixelscan «masking» и CreepJS «stealth»")
         elif not good and label in ("VPN", "Proxy Detection", "IP Blocklist"):
             note = " — свойство IP (прокси/VPN/хостинг), а не отпечатка"
         items.append(("ok" if good else severity, f"Fingerprint.com: {label}", val + note))
@@ -247,6 +251,10 @@ async def run_external(manager, pid: int, sites: Optional[list[str]] = None,
     if p:
         p.last_external = out
         db.save_profile(p)
+        if out["fail"]:
+            from .notify import notify
+            notify("check_fail", f"Детекторы, профиль #{pid} {p.name}: ✗ {out['fail']}\n" + "\n".join(
+                f"✗ {t} — {d}" for s in out["sites"].values() for st, t, d in s["items"] if st == "fail"))
     return out
 
 

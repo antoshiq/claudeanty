@@ -179,6 +179,9 @@ class Scheduler:
         t["next_run"] = next_run(t, time.time()) if t.get("enabled", True) else None
         db.save_doc("tasks", t)
         self.say(f"Планировщик: «{t['name']}» — {result}")
+        from .notify import notify
+        bad = "ошибк" in result or "нет профилей" in result or "с проблемами" in result and "с проблемами 0" not in result
+        notify("task_error" if bad else "task_done", f"«{t['name']}»: {result}")
         return result
 
     async def _do(self, t: dict) -> str:

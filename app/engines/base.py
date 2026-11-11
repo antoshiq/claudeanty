@@ -39,3 +39,12 @@ class Engine:
     async def start(self, profile: Profile, proxy: Optional[Proxy], user_data_dir: str,
                     headless: bool = False) -> RunningSession:
         raise NotImplementedError
+
+
+async def evaluate_main(target, expression: str, arg=None):
+    """evaluate в главном мире страницы (там, где работают подмены отпечатка и код сайта).
+    Patchright по умолчанию выполняет код в изолированном мире — невидимом для сайта, но и без подмен."""
+    try:
+        return await target.evaluate(expression, arg, isolated_context=False)
+    except TypeError:  # обычный Playwright: параметра нет, код и так в главном мире
+        return await target.evaluate(expression, arg)

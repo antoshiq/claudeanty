@@ -85,6 +85,9 @@ def create_bulk(req: BulkRequest):
 @app.patch("/profiles/{pid}")
 def patch_profile(pid: int, changes: dict):
     p = _profile_or_404(pid)
+    if changes.get("status") == "ban" and p.status != "ban":
+        from ..notify import notify
+        notify("ban", f"Профиль #{p.id} {p.name} (через API)")
     changes.pop("id", None)
     changes.pop("fingerprint", None)
     data = p.model_copy(update=changes)
@@ -134,6 +137,17 @@ def external_check(pid: int, sites: str = ""):
     from ..external_check import run_external
     _profile_or_404(pid)
     return manager.run(run_external(manager, pid, [s for s in sites.split(",") if s] or None), timeout=600)
+
+
+@app.post("/profiles/{pid}/stability")
+def stability(pid: int, runs: int = 3):
+    """Несколько запусков подряд и сравнение хэшей canvas / WebGL / audio / шрифтов / navigator."""
+    from ..check import stability_test
+    _profile_or_404(pid)
+    try:
+        return manager.run(stability_test(manager, pid, runs), timeout=900)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
 
 
 @app.post("/profiles/{pid}/warmup")
@@ -306,6 +320,31 @@ def import_profiles(body: ImportIn):
         raise HTTPException(400, str(e))
 
 
+class ExternalImportIn(BaseModel):
+    source: str = "file"  # file | dolphin | adspower
+    path: str = ""
+    token: str = ""  # Dolphin Anty
+    base: str = "http://local.adspower.net:50325"  # AdsPower
+    api_key: str = ""
+    cookies: bool = True
+
+
+@app.post("/profiles/import-external")
+def import_external(body: ExternalImportIn):
+    """Импорт из Dolphin Anty (API-токен), AdsPower (локальный API) или таблицы CSV/XLSX/JSON."""
+    from .. import importers
+    try:
+        if body.source == "dolphin":
+            rows = importers.fetch_dolphin(body.token)
+        elif body.source == "adspower":
+            rows = importers.fetch_adspower(body.base, body.api_key)
+        else:
+            rows = importers.read_file(body.path)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, str(e))
+    return manager.run(importers.import_items(manager, rows, manager.scheduler.say, cookies=body.cookies), timeout=None)
+
+
 @app.post("/backup")
 def backup_now():
     from ..backup import backup_all
@@ -346,6 +385,16 @@ def check(proxy_id: int):
     res = manager.run(check_proxy(p))
     db.save_proxy(p)
     return res
+
+
+@app.post("/proxies/{proxy_id}/change-ip")
+def change_proxy_ip(proxy_id: int):
+    """Открыть ссылку смены IP мобильного прокси и дождаться нового адреса."""
+    from ..proxy.rotate import change_ip
+    p = db.get_proxy(proxy_id)
+    if not p:
+        raise HTTPException(404, "proxy not found")
+    return manager.run(change_ip(p, manager.scheduler.say), timeout=300)
 
 
 def start_api_thread() -> threading.Thread:

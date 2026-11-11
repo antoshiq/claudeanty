@@ -38,19 +38,21 @@ class ProfilesSidebar(QFrame):
         v.addWidget(side_title("ПРОФИЛИ",
                                tool("plus", "Новый профиль (Ctrl+N)", page.new_profile),
                                tool("copy", "Создать массово", page.bulk_create),
-                               tool("folder_open", "Импорт профилей из файла (.caprofile)", page.import_profiles),
+                               tool("folder_open", "Импорт: файл claudeAnty, Dolphin Anty, AdsPower, таблица",
+                                    page.import_menu),
                                tool("refresh", "Обновить (F5)", page.refresh)))
         self.folders = side_list()
         self.statuses = side_list()
         self.tags = side_list()
         for lst, kind in ((self.folders, "folder"), (self.statuses, "status"), (self.tags, "tag")):
             lst.itemClicked.connect(lambda it, k=kind: self._pick(k, it))
-        v.addWidget(section("ПАПКИ"))
+        v.addWidget(section("ПАПКИ", self.folders, "profiles.folders"))
         v.addWidget(self.folders, 3)
-        v.addWidget(section("МЕТКИ"))
+        v.addWidget(section("МЕТКИ", self.statuses, "profiles.statuses"))
         v.addWidget(self.statuses, 2)
-        v.addWidget(section("ТЕГИ"))
+        v.addWidget(section("ТЕГИ", self.tags, "profiles.tags"))
         v.addWidget(self.tags, 2)
+        v.addStretch(0)  # забирает место, когда все разделы свёрнуты — заголовки остаются наверху
 
     def _pick(self, kind, item):
         val = item.data(Qt.UserRole)
@@ -309,6 +311,7 @@ class ProfilesPage(QWidget):
         m.addSeparator()
         add(m, "fingerprint", "Проверить отпечаток", self.check_selected)
         add(m, "shield", "Отчёт внешних детекторов", self.external_selected)
+        add(m, "repeat", "Проверить стабильность отпечатка", self.stability_selected)
         add(m, "external", "Открыть сайты проверки", self.open_sites)
         add(m, "flame", "Прогреть cookies", self.warmup_selected)
         m.addSeparator()
@@ -317,6 +320,7 @@ class ProfilesPage(QWidget):
         m.addSeparator()
         add(m, "download", "Экспорт профилей в файл…", self.export_profiles)
         add(m, "folder_open", "Импорт профилей из файла…", self.import_profiles)
+        add(m, "folder_open", "Импорт из Dolphin / AdsPower / таблицы…", self.import_external)
         m.addSeparator()
         add(m, "trash", "Удалить", self.delete_selected, "Del")
         m.exec(self.table.viewport().mapToGlobal(pos))
@@ -383,6 +387,9 @@ class ProfilesPage(QWidget):
         for pid in ids:
             p = db.get_profile(pid)
             if p:
+                if key == "ban" and p.status != "ban":
+                    from ...notify import notify
+                    notify("ban", f"Профиль #{p.id} {p.name}" + (f" (папка {p.folder})" if p.folder else ""))
                 p.status = key
                 db.save_profile(p)
         self.win.log(f"Метка «{STATUSES[key][0]}» — профилей: {len(ids)}")
@@ -406,7 +413,8 @@ class ProfilesPage(QWidget):
         lst.setObjectName("boxList")
         lst.setFixedHeight(150)
         for px in proxies:
-            it = QListWidgetItem(f"{ {'ok': '✓', 'fail': '✗'}.get(px.status, '—') }  {px.type}://{px.host}:{px.port}  {px.country}")
+            it = QListWidgetItem(f"{ {'ok': '✓', 'fail': '✗'}.get(px.status, '—') }  {px.type}://{px.host}:{px.port}  {px.country}"
+                                 + (f"  · {px.tcp_os}" if px.tcp_os else ""))
             it.setData(Qt.UserRole, px.id)
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
             it.setCheckState(Qt.Checked if px.status != "fail" else Qt.Unchecked)
@@ -685,3 +693,131 @@ class ProfilesPage(QWidget):
         if ids:
             accounts_modal(self.win, ids[0], self.win.log)
             self.show_details()
+
+    # ---------- импорт из других антидетект-браузеров ----------
+    def import_menu(self):
+        from PySide6.QtGui import QCursor
+        m = QMenu(self)
+        for text, fn in (("Файл claudeAnty (.caprofile)…", self.import_profiles),
+                         ("Dolphin Anty / AdsPower / таблица…", self.import_external)):
+            a = QAction(icon("folder_open", C["text"], 14), text, m)
+            a.triggered.connect(lambda _=False, fn=fn: fn())
+            m.addAction(a)
+        m.exec(QCursor.pos())
+
+    def import_external(self):
+        from PySide6.QtWidgets import QCheckBox, QLineEdit
+        from ... import importers
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        src = QComboBox()
+        src.addItem("Таблица или файл (CSV, XLSX, JSON) — шаблоны AdsPower, Dolphin и свои", "file")
+        src.addItem("Dolphin Anty — через API (токен из личного кабинета)", "dolphin")
+        src.addItem("AdsPower — через локальный API (AdsPower должен быть запущен)", "adspower")
+        path = QLineEdit()
+        path.setPlaceholderText("Путь к файлу")
+        browse = QPushButton("Выбрать…")
+        prow = QHBoxLayout()
+        prow.addWidget(path, 1)
+        prow.addWidget(browse)
+        browse.clicked.connect(lambda: path.setText(QFileDialog.getOpenFileName(
+            self, "Файл с профилями", "", "Таблицы (*.xlsx *.csv *.txt *.json);;Все (*)")[0] or path.text()))
+        token = QLineEdit()
+        token.setPlaceholderText("API-токен Dolphin Anty")
+        token.setEchoMode(QLineEdit.Password)
+        base = QLineEdit("http://local.adspower.net:50325")
+        key = QLineEdit()
+        key.setPlaceholderText("API key AdsPower (если включена проверка ключа)")
+        cookies = QCheckBox("Перенести cookies (если они есть в источнике)")
+        cookies.setChecked(True)
+        hint = QLabel("Переносятся название, ОС и тип, прокси (с ссылкой смены IP), cookies, логин/пароль/2FA "
+                      "(в «Пароли и 2FA»), заметки, теги и группа. Отпечаток создаётся новый, свой: чужой "
+                      "User-Agent со старой версией Chrome не совпал бы с движком. Колонки таблицы узнаются "
+                      "по названиям: name, proxy (или proxytype/ip/port/user/pass), cookie, username, password, "
+                      "fakey/2fa, ua/platform, remark, group, tags.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        lay.addWidget(src)
+        pw = QWidget()
+        pw.setLayout(prow)
+        prow.setContentsMargins(0, 0, 0, 0)
+        for x in (pw, token, base, key, cookies, hint):
+            lay.addWidget(x)
+
+        def sync():
+            m = src.currentData()
+            pw.setVisible(m == "file")
+            token.setVisible(m == "dolphin")
+            base.setVisible(m == "adspower")
+            key.setVisible(m == "adspower")
+        src.currentIndexChanged.connect(lambda _: sync())
+        sync()
+
+        def validate():
+            m = src.currentData()
+            if m == "file" and not Path(path.text().strip()).is_file():
+                return "Выберите файл"
+            if m == "dolphin" and not token.text().strip():
+                return "Вставьте токен Dolphin Anty"
+            return None
+
+        if not Modal(self.win, "Импорт из других браузеров", w, ok_text="Импортировать", width=620,
+                     validate=validate).exec():
+            return
+        mode, p_path, tok, b, k, ck = (src.currentData(), path.text().strip(), token.text().strip(), base.text().strip(),
+                                       key.text().strip(), cookies.isChecked())
+        say = manager.scheduler.say
+        self.win.log("Импорт профилей…")
+
+        def job():
+            if mode == "file":
+                rows = importers.read_file(p_path)
+            elif mode == "dolphin":
+                rows = importers.fetch_dolphin(tok, say)
+            else:
+                rows = importers.fetch_adspower(b, k, say)
+            if not rows:
+                raise ValueError("в источнике не найдено ни одного профиля")
+            return manager.run(importers.import_items(manager, rows, say, cookies=ck), timeout=None)
+
+        def done(r, e):
+            if e:
+                self.win.log(f"Ошибка импорта: {e}")
+            else:
+                self.win.log(f"Импортировано профилей: {len(r['profiles'])}, cookies: {r['cookies']}, "
+                             f"аккаунтов: {r['accounts']}" + (f", ошибок: {len(r['errors'])}" if r["errors"] else ""))
+                for err in r["errors"][:10]:
+                    self.win.log("  " + err)
+            self.refresh()
+
+        run_bg(job, done, self)
+
+    # ---------- стабильность отпечатка ----------
+    def stability_selected(self):
+        from ...check import stability_test
+        for pid in self._need():
+            if pid in self.busy:
+                continue
+            if manager.is_running(pid):
+                self.win.log(f"#{pid}: остановите профиль — для проверки стабильности он запускается заново")
+                continue
+            self.busy[pid] = "…  Стабильность"
+            self.win.log(f"Стабильность отпечатка #{pid}: три запуска подряд…")
+
+            def done(r, e, pid=pid):
+                self.busy.pop(pid, None)
+                if e:
+                    self.win.log(f"Ошибка проверки стабильности #{pid}: {e}")
+                elif r["changed"]:
+                    self.win.log(f"#{pid}: отпечаток МЕНЯЕТСЯ между запусками: "
+                                 + ", ".join(r["parts"][k] for k in r["changed"]))
+                else:
+                    self.win.log(f"#{pid}: отпечаток одинаковый во всех {r['runs']} запусках ("
+                                 + ", ".join(r["parts"].values()) + ")"
+                                 + (f"; не удалось снять: {', '.join(r['errors'])}" if r["errors"] else ""))
+                self.refresh()
+
+            run_bg(lambda pid=pid: manager.run(stability_test(manager, pid, 3), timeout=600), done, self)
+        self.refresh()
