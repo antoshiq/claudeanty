@@ -11,7 +11,11 @@ from . import db
 from .proxy.checker import locale_for
 
 URL = "https://check.claudeanty.test/"
-SITES = ["https://abrahamjuliot.github.io/creepjs/", "https://pixelscan.net/", "https://browserleaks.com/webrtc"]
+FRAME_URL = "https://frame.claudeanty-other.test/"  # другой сайт -> iframe в отдельном процессе (OOPIF)
+FRAME_PAGE = ("<!doctype html><script>parent.postMessage({ tz: Intl.DateTimeFormat().resolvedOptions().timeZone, "
+              "cores: navigator.hardwareConcurrency, lang: navigator.language, ua: navigator.userAgent }, '*')</script>")
+SITES = ["https://abrahamjuliot.github.io/creepjs/", "https://pixelscan.net/fingerprint-check",
+         "https://demo.fingerprint.com/playground", "https://browserleaks.com/ip"]
 
 _DETECT = (Path(__file__).parent / "fingerprints" / "inject" / "detect.js").read_text(encoding="utf-8")
 
@@ -80,9 +84,43 @@ window.collect = async () => {
   out.fonts = {};
   for (const f of ['Segoe UI', 'Helvetica Neue', 'Ubuntu', 'Roboto', 'Arial', 'Calibri', 'Menlo'])
     out.fonts[f] = span(`'${f}', monospace`) !== base;
+  // iframe в отдельном процессе: другой сайт и sandbox. Эмуляция действует на процесс рендерера —
+  // если её не применить к такому iframe, в нём видны системные таймзона, ядра и язык
+  const frame = (attrs) => new Promise(res => {
+    const f = document.createElement('iframe');
+    for (const [k, v] of Object.entries(attrs)) if (k !== 'src' && k !== 'srcdoc') f.setAttribute(k, v);
+    if (attrs.srcdoc) f.srcdoc = attrs.srcdoc; else f.src = attrs.src;
+    const h = e => { if (e.source === f.contentWindow) { removeEventListener('message', h); f.remove(); res(e.data); } };
+    addEventListener('message', h);
+    document.body.appendChild(f);
+    setTimeout(() => { removeEventListener('message', h); res(null); }, 8000);
+  });
+  const probe = "<script>parent.postMessage({ tz: Intl.DateTimeFormat().resolvedOptions().timeZone, " +
+    "cores: navigator.hardwareConcurrency, lang: navigator.language, ua: navigator.userAgent }, '*')<\/script>";
+  out.frames = { cross: await frame({ src: '__FRAME_URL__' }), sandbox: await frame({ sandbox: 'allow-scripts', srcdoc: probe }) };
+  out.self = { tz: out.tz, cores: navigator.hardwareConcurrency, lang: navigator.language, ua: navigator.userAgent };
+  // DRM и кодеки: у настоящего Chrome есть Widevine, H.264/AAC и (на Windows/macOS/Android) HEVC
+  out.drm = await (async () => {
+    const cfg = [{ initDataTypes: ['cenc'], audioCapabilities: [{ contentType: 'audio/mp4;codecs="mp4a.40.2"' }],
+                   videoCapabilities: [{ contentType: 'video/mp4;codecs="avc1.42E01E"' }] }];
+    try { await navigator.requestMediaKeySystemAccess('com.widevine.alpha', cfg); return 'ok'; }
+    catch (e) { return e.name || String(e); }
+  })();
+  const v = document.createElement('video');
+  out.codecs = {};
+  for (const [k, t] of [['H.264', 'video/mp4; codecs="avc1.42E01E"'], ['AAC', 'audio/mp4; codecs="mp4a.40.2"'],
+                        ['HEVC', 'video/mp4; codecs="hev1.1.6.L93.B0"'], ['VP9', 'video/webm; codecs="vp9"'],
+                        ['AV1', 'video/mp4; codecs="av01.0.05M.08"']])
+    out.codecs[k] = v.canPlayType(t);
+  try {
+    const r = await navigator.mediaCapabilities.decodingInfo({ type: 'media-source', video: {
+      contentType: 'video/mp4; codecs="avc1.42E01E"', width: 1920, height: 1080, bitrate: 5e6, framerate: 30 },
+      keySystemConfiguration: { keySystem: 'com.widevine.alpha' } });
+    out.mc_drm = !!(r.supported && r.keySystemAccess);
+  } catch (e) { out.mc_drm = false; }
   return out;
 };
-</script><script>__DETECT__</script></body></html>""".replace("__DETECT__", _DETECT)
+</script><script>__DETECT__</script></body></html>""".replace("__DETECT__", _DETECT).replace("__FRAME_URL__", FRAME_URL)
 
 _UA_OS = {"Win32": "Windows", "MacIntel": "Macintosh", "Linux x86_64": "Linux", "Linux armv81": "Android"}
 _OS_FONTS = {"windows": "Segoe UI", "macos": "Helvetica Neue", "linux": "Ubuntu", "android": "Roboto"}
@@ -112,12 +150,14 @@ async def run_check(manager, pid: int) -> dict:
 
     try:
         await ctx.route(URL + "**", lambda r: r.fulfill(body=PAGE, content_type="text/html; charset=utf-8"))
+        await ctx.route(FRAME_URL + "**", lambda r: r.fulfill(body=FRAME_PAGE, content_type="text/html; charset=utf-8"))
         page = await ctx.new_page()
         await page.goto(URL, timeout=30000)
         d = await page.evaluate("collect()")
         det = await page.evaluate("__caDetect()")
         await page.close()
         await ctx.unroute(URL + "**")
+        await ctx.unroute(FRAME_URL + "**")
 
         ip = {}
         try:
@@ -179,7 +219,27 @@ async def run_check(manager, pid: int) -> dict:
             foreign = [f for f, os_ in ((v, k) for k, v in _OS_FONTS.items()) if os_ != os_name and d["fonts"].get(f)]
             add(not foreign, "Нет шрифтов чужой ОС", ("видны: " + ", ".join(foreign)) if foreign else
                 f"шрифт своей ОС «{own}»: {'есть' if d['fonts'].get(own) else 'нет на этом ПК (норма при эмуляции)'}")
-        # 10. детекты JS-подмены и автоматизации (как в CreepJS)
+        # 10. iframe в отдельном процессе
+        for key, title in (("cross", "Iframe другого сайта совпадает со страницей"),
+                           ("sandbox", "Sandbox-iframe совпадает со страницей")):
+            fr = (d.get("frames") or {}).get(key)
+            if not fr:
+                add("warn", title, "iframe не ответил")
+                continue
+            diff = [f"{k}: {fr[k]} ≠ {d['self'][k]}" for k in ("tz", "cores", "lang", "ua") if fr.get(k) != d["self"][k]]
+            add(not diff, title, "таймзона, ядра, язык и UA совпадают" if not diff else "; ".join(diff)[:300])
+        # 11. DRM и медиакодеки (Chrome for Testing и Chromium без Widevine выдают себя)
+        if p.engine == "chromium":
+            drm_ok = d.get("drm") == "ok" and d.get("mc_drm")
+            add(drm_ok, "DRM Widevine доступен, как в Chrome",
+                "requestMediaKeySystemAccess и MediaCapabilities: ok" if drm_ok else
+                f"Widevine: {d.get('drm')}, MediaCapabilities: {d.get('mc_drm')} — нужен движок Google Chrome")
+            codecs = d.get("codecs", {})
+            need = ["H.264", "AAC", "VP9", "AV1"] + (["HEVC"] if (mobile or p.os in ("windows", "macos")) else [])
+            missing = [k for k in need if codecs.get(k) != "probably"]
+            add(not missing, "Медиакодеки как у Chrome",
+                ", ".join(f"{k}: {codecs.get(k) or 'нет'}" for k in codecs) if missing else "H.264, AAC, HEVC, VP9, AV1 — есть")
+        # 12. детекты JS-подмены и автоматизации (как в CreepJS)
         for key, title in DETECT_TITLES.items():
             if key in det and (p.engine == "chromium" or key in ("cdp_runtime", "no_artifacts", "iframe_consistent")):
                 add(det[key]["ok"], title, det[key]["detail"])

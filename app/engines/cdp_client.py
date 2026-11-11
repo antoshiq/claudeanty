@@ -21,6 +21,11 @@ import websockets
 log = logging.getLogger("claudeanty.cdp")
 
 PAGE_TYPES = ("page", "iframe")
+# Что применять к iframe из другого процесса (OOPIF, сайт другого домена). Эмуляция таймзоны, языка и т.п.
+# действует на процесс рендерера, поэтому такой iframe её НЕ наследует: без этого в нём видна системная
+# таймзона ПК (fingerprint.com: «VPN — timezone mismatch»). Размер экрана и touch задаёт только главная страница.
+IFRAME_METHODS = ("Emulation.setUserAgentOverride", "Emulation.setTimezoneOverride", "Emulation.setLocaleOverride",
+                  "Emulation.setHardwareConcurrencyOverride", "Emulation.setGeolocationOverride", "Page.")
 WORKER_TYPES = ("worker", "shared_worker", "service_worker")
 
 
@@ -108,8 +113,8 @@ class CDPClient:
             if kind in PAGE_TYPES:
                 self.stats["pages"] += 1
                 for method, params in self.page_cmds:
-                    if kind == "iframe" and not method.startswith(("Emulation.setUserAgentOverride", "Page.")):
-                        continue  # iframe наследует эмуляцию страницы
+                    if kind == "iframe" and not method.startswith(IFRAME_METHODS):
+                        continue  # остальное iframe наследует от страницы
                     await self._try(method, params, sid)
                 await self._try("Target.setAutoAttach",
                                 {"autoAttach": True, "waitForDebuggerOnStart": True, "flatten": True}, sid)

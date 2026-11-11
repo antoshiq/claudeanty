@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QFrame
 from ... import cookies as ck
 from ... import db, settings
 from ...check import format_report, open_check_sites, run_check
+from ...external_check import format_external, run_external
 from ...fingerprints.generator import DEVICES
 from ...manager import manager
 from ...models import STATUSES, Profile, Proxy
@@ -37,6 +38,7 @@ class ProfilesSidebar(QFrame):
         v.addWidget(side_title("ПРОФИЛИ",
                                tool("plus", "Новый профиль (Ctrl+N)", page.new_profile),
                                tool("copy", "Создать массово", page.bulk_create),
+                               tool("folder_open", "Импорт профилей из файла (.caprofile)", page.import_profiles),
                                tool("refresh", "Обновить (F5)", page.refresh)))
         self.folders = side_list()
         self.statuses = side_list()
@@ -147,6 +149,9 @@ class ProfilesPage(QWidget):
         al.setSpacing(2)
         al.addStretch()
         al.addWidget(tool("fingerprint", "Проверить отпечаток", self.check_selected))
+        al.addWidget(tool("shield", "Отчёт внешних детекторов (pixelscan, CreepJS, fingerprint.com, browserleaks)",
+                          self.external_selected))
+        al.addWidget(tool("key", "Пароли и 2FA профиля", self.accounts_selected))
         al.addWidget(tool("flame", "Прогреть cookies", self.warmup_selected))
         al.addWidget(tool("upload", "Импорт cookies в выбранный профиль", self.import_cookies))
         al.addWidget(tool("download", "Экспорт cookies выбранного профиля", self.export_cookies))
@@ -264,12 +269,17 @@ class ProfilesPage(QWidget):
             ("proxy", f"{px.type}://{px.host}:{px.port} {px.country}" if px else "нет"),
             ("start", ", ".join(p.start_urls) or None), ("extensions", str(len(p.extensions)) if p.extensions else None),
             ("notes", p.notes.replace("\n", " ") or None),
+            ("accounts", self._accounts_line(p.id)),
         ]
         text = "\n".join(f"{k:<11} {v}" for k, v in info if v not in (None, ""))
         if p.last_check:
             text += "\n\n" + format_report(p.last_check)
         else:
             text += "\n\nОтпечаток ещё не проверялся — кнопка с отпечатком пальца вверху справа."
+        if p.last_external:
+            text += "\n\n" + format_external(p.last_external)
+        else:
+            text += "\nОтчёт внешних детекторов — кнопка со щитом (pixelscan, CreepJS, fingerprint.com, browserleaks)."
         self.win.set_details(text)
 
     def _context_menu(self, pos):
@@ -295,13 +305,18 @@ class ProfilesPage(QWidget):
             a.triggered.connect(lambda _=False, k=key: self.set_status(k))
             st.addAction(a)
         add(m, "globe", "Назначить прокси…", self.assign_proxies)
+        add(m, "key", "Пароли и 2FA…", self.accounts_selected)
         m.addSeparator()
         add(m, "fingerprint", "Проверить отпечаток", self.check_selected)
+        add(m, "shield", "Отчёт внешних детекторов", self.external_selected)
         add(m, "external", "Открыть сайты проверки", self.open_sites)
         add(m, "flame", "Прогреть cookies", self.warmup_selected)
         m.addSeparator()
         add(m, "upload", "Импорт cookies…", self.import_cookies)
         add(m, "download", "Экспорт cookies…", self.export_cookies)
+        m.addSeparator()
+        add(m, "download", "Экспорт профилей в файл…", self.export_profiles)
+        add(m, "folder_open", "Импорт профилей из файла…", self.import_profiles)
         m.addSeparator()
         add(m, "trash", "Удалить", self.delete_selected, "Del")
         m.exec(self.table.viewport().mapToGlobal(pos))
@@ -505,9 +520,31 @@ class ProfilesPage(QWidget):
             run_bg(lambda pid=pid: manager.run(run_check(manager, pid), timeout=300), done, self)
         self.refresh()
 
+    def external_selected(self):
+        for pid in self._need():
+            if pid in self.busy:
+                continue
+            self.busy[pid] = "…  Детекторы"
+            self.win.log(f"Отчёт внешних детекторов #{pid}: pixelscan, CreepJS, fingerprint.com, browserleaks "
+                         "(около двух минут)…")
+
+            def done(res, err, pid=pid):
+                self.busy.pop(pid, None)
+                if err:
+                    self.win.log(f"Ошибка отчёта детекторов #{pid}: {err}")
+                else:
+                    self.win.log(f"Детекторы #{pid}: ✓ {res['ok']}, ! {res['warn']}, ✗ {res['fail']} — подробности "
+                                 "в панели «Отпечаток»")
+                    self.win.panel.setCurrentWidget(self.win.details)
+                self.refresh()
+                self.show_details()
+
+            run_bg(lambda pid=pid: manager.run(run_external(manager, pid), timeout=900), done, self)
+        self.refresh()
+
     def open_sites(self):
         for pid in self._need():
-            self.win.log(f"Открываю CreepJS, pixelscan и browserleaks в профиле #{pid}…")
+            self.win.log(f"Открываю CreepJS, pixelscan, fingerprint.com и browserleaks в профиле #{pid}…")
             run_bg(lambda pid=pid: manager.run(open_check_sites(manager, pid)),
                    lambda r, e, pid=pid: (self.win.log(f"Ошибка: {e}") if e else None, self.refresh()), self)
 
@@ -558,3 +595,93 @@ class ProfilesPage(QWidget):
 
         run_bg(job, lambda res, err: self.win.log(f"Ошибка экспорта: {err}" if err else
                                                   f"Экспортировано cookies: {res} → {path}"), self)
+
+    # ---------- экспорт/импорт профилей одним файлом ----------
+    def export_profiles(self):
+        from PySide6.QtWidgets import QCheckBox
+        from ...backup import EXT, export_profiles
+        ids = self._need()
+        if not ids:
+            return
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        info = QLabel(f"Профилей: {len(ids)}. В файл попадут настройки и отпечаток, прокси, cookies и данные браузера "
+                      "(история, localStorage, IndexedDB, расширения) — без кэшей. Файл можно импортировать на другом ПК.")
+        info.setWordWrap(True)
+        secrets = QCheckBox("Включить пароли и 2FA-секреты")
+        warn = QLabel("В файле они будут в открытом виде — храните его как пароль.")
+        warn.setObjectName("hint")
+        warn.setWordWrap(True)
+        lay.addWidget(info)
+        lay.addWidget(secrets)
+        lay.addWidget(warn)
+        if not Modal(self.win, "Экспорт профилей", w, ok_text="Выбрать файл…", width=520).exec():
+            return
+        name = db.get_profile(ids[0]).name if len(ids) == 1 else f"profiles_{len(ids)}"
+        safe = "".join(c if c.isalnum() or c in " _-" else "_" for c in name).strip() or "profile"
+        path, _ = QFileDialog.getSaveFileName(self, "Сохранить профили", safe + EXT, f"Профили claudeAnty (*{EXT})")
+        if not path:
+            return
+        if not path.endswith(EXT):
+            path += EXT
+        inc = secrets.isChecked()
+        self.win.log(f"Экспорт профилей ({len(ids)}) в {path}…")
+
+        def done(r, e):
+            if e:
+                self.win.log(f"Ошибка экспорта: {e}")
+                return
+            self.win.log(f"Экспортировано профилей: {r['profiles']}, {r['size'] / 1e6:.1f} МБ → {r['path']}"
+                         + (f" (пропущено занятых файлов: {r['skipped_files']})" if r["skipped_files"] else ""))
+
+        run_bg(lambda: manager.run(export_profiles(manager, ids, path, include_secrets=inc), timeout=3600), done, self)
+
+    def import_profiles(self, path: str = ""):
+        from ...backup import EXT, import_archive, read_manifest
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(self, "Импорт профилей", "", f"Профили claudeAnty (*{EXT} *.zip);;Все (*)")
+        if not path:
+            return
+        try:
+            m = read_manifest(path)
+        except Exception as e:  # noqa: BLE001
+            self.win.log(f"Не удалось открыть архив: {e}")
+            return
+        names = ", ".join(e["profile"]["name"] for e in m["profiles"][:5]) + ("…" if len(m["profiles"]) > 5 else "")
+        text = (f"Будут добавлены профили ({len(m['profiles'])}): {names}.\n"
+                f"Архив создан {m.get('created', '?')}. Существующие профили не изменятся.")
+        if not confirm(self.win, "Импорт профилей", text, ok_text="Импортировать", danger=False):
+            return
+        self.win.log(f"Импорт профилей из {path}…")
+
+        def done(r, e):
+            if e:
+                self.win.log(f"Ошибка импорта: {e}")
+            else:
+                ids = ", ".join(f"#{i}" for i in r["profiles"])
+                self.win.log(f"Импортировано профилей: {len(r['profiles'])} ({ids}), cookies: {r['cookies']}, "
+                             f"аккаунтов: {r['accounts']}"
+                             + (f". С другого ПК: {r['foreign']} — сохранённые в Chrome пароли не переносятся, "
+                                "cookies восстановлены из архива" if r["foreign"] else ""))
+            self.refresh()
+
+        run_bg(lambda: manager.run(import_archive(manager, path), timeout=3600), done, self)
+
+    # ---------- пароли и 2FA ----------
+    @staticmethod
+    def _accounts_line(pid: int):
+        accs = db.list_accounts(pid)
+        if not accs:
+            return None
+        n2fa = sum(1 for a in accs if a.totp)
+        return ", ".join(a.service or a.login for a in accs[:4]) + ("…" if len(accs) > 4 else "") + \
+            (f"  (2FA: {n2fa})" if n2fa else "")
+
+    def accounts_selected(self):
+        from ..accounts import accounts_modal
+        ids = self._need()
+        if ids:
+            accounts_modal(self.win, ids[0], self.win.log)
+            self.show_details()

@@ -11,7 +11,7 @@ from . import db
 from .config import PROFILES_DIR
 from .engines.base import RunningSession
 from .engines.camoufox_engine import CamoufoxEngine, make_camoufox_fingerprint
-from .engines.chrome_version import engine_version
+from .engines.chrome_version import engine_version, playwright_chromium
 from .engines.chromium import ChromiumEngine
 from .fingerprints.generator import generate
 from .models import Profile, Proxy
@@ -25,14 +25,21 @@ class Manager:
         self._starting: set[int] = set()
         self._direct_geo = None  # (время, гео по прямому IP)
         self._engines = {"chromium": ChromiumEngine(), "camoufox": CamoufoxEngine()}
-        self.chrome_version = engine_version()  # прогрев кэша вне asyncio-цикла
+        playwright_chromium()  # прогрев кэша вне asyncio-цикла (sync API Playwright)
         from .sync import Synchronizer
+        from .scheduler import Scheduler
         self.sync = Synchronizer(self)
+        self.scheduler = Scheduler(self)  # стартует из run.py: работает, пока открыто приложение
         threading.Thread(target=self.loop.run_forever, daemon=True, name="browser-loop").start()
 
     # ---- вызов из любого потока ----
     def run(self, coro, timeout: Optional[float] = 180):
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout)
+
+    @property
+    def chrome_version(self) -> str:
+        """Версия браузера, который запускается сейчас (Chrome обновляется сам — читается каждый раз)."""
+        return engine_version()
 
     def is_running(self, pid: int) -> bool:
         return pid in self.sessions

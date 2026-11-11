@@ -67,6 +67,19 @@ class Profile(BaseModel):
     bookmarks: list[dict] = Field(default_factory=list)  # [{"title", "url"}]
     extensions: list[str] = Field(default_factory=list)  # пути к распакованным расширениям
     last_check: dict = Field(default_factory=dict)  # результат последней проверки отпечатка
+    last_external: dict = Field(default_factory=dict)  # последний отчёт внешних детекторов (pixelscan, CreepJS…)
+
+
+class Account(BaseModel):
+    """Логин/пароль/2FA сайта в профиле. В базе password, totp и notes зашифрованы (DPAPI, см. crypto.py)."""
+    id: Optional[int] = None
+    profile_id: int
+    service: str = ""  # название: Google, Facebook…
+    url: str = ""  # адрес входа
+    login: str = ""
+    password: str = ""
+    totp: str = ""  # секрет 2FA: base32 («JBSW Y3DP…») или ссылка otpauth://totp/…
+    notes: str = ""  # резервные коды и т.п.
 
 
 STATUSES = {

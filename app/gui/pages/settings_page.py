@@ -47,8 +47,9 @@ class SettingsPage(QWidget):
     key, title, icon_name = "settings", "Настройки", "settings"
     search_hint = "Поиск настроек"
 
-    SECTIONS = [("profiles", "Новые профили", "users"), ("browser", "Поведение", "monitor"),
-                ("proxies", "Прокси", "globe"), ("warmup", "Прогрев cookies", "flame"), ("ui", "Внешний вид", "layers"),
+    SECTIONS = [("engine", "Движок", "shield"), ("profiles", "Новые профили", "users"), ("browser", "Поведение", "monitor"),
+                ("proxies", "Прокси", "globe"), ("warmup", "Прогрев cookies", "flame"), ("rpa", "Сценарии", "workflow"),
+                ("ui", "Внешний вид", "layers"),
                 ("api", "Локальный API", "plug"), ("data", "Данные", "folder")]
 
     def __init__(self, win):
@@ -78,6 +79,46 @@ class SettingsPage(QWidget):
         note = QLabel("Изменения сохраняются автоматически.")
         note.setObjectName("settingDesc")
         self.body.addWidget(note)
+
+        # ---------- движок ----------
+        self._h("engine")
+        from ...engines.chrome_version import find_chrome
+        chrome = find_chrome()
+        self._combo("engine", "Браузер для Chromium-профилей",
+                          "Google Chrome — установленный браузер: сам обновляется, есть Widevine (DRM) и все кодеки, "
+                          "как у обычных людей (рекомендуется). Chrome for Testing — сборка Playwright, без Widevine. "
+                          "Применяется к следующим запускам профилей.", "chrome_engine",
+                          [("Google Chrome (установленный)" if chrome else "Google Chrome — не установлен", "chrome"),
+                           ("Chrome for Testing (Playwright)", "chromium")], on_change=lambda _: self.check_engine())
+        self.engine_state = QLabel("Проверка версии…")
+        self.engine_state.setObjectName("settingDesc")
+        self.engine_state.setWordWrap(True)
+        self.engine_state.setMinimumWidth(460)
+        btns = QWidget()
+        bl = QHBoxLayout(btns)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(6)
+        chk_btn = QPushButton("  Проверить обновления")
+        set_icon(chk_btn, "refresh", "text", 14)
+        chk_btn.clicked.connect(lambda: self.check_engine(force=True))
+        self.update_btn = QPushButton("  Обновить движок")
+        set_icon(self.update_btn, "download", "text", 14)
+        self.update_btn.clicked.connect(self.update_engine)
+        for b in (chk_btn, self.update_btn):
+            b.setCursor(Qt.PointingHandCursor)
+            bl.addWidget(b)
+        bl.addStretch()
+        box = QWidget()
+        bv = QVBoxLayout(box)
+        bv.setContentsMargins(0, 0, 0, 0)
+        bv.addWidget(self.engine_state)
+        bv.addWidget(btns)
+        self._row("engine", "Версия", "Устаревшая версия Chrome в User-Agent выделяется на фоне обычных пользователей.", box)
+        self._check("engine", "Следить за обновлениями",
+                    "При запуске и раз в 6 часов сверять версию движка с актуальной стабильной и предупреждать, "
+                    "если он отстаёт.", "update_check")
+        self._engine_busy = False
+        QTimer.singleShot(300, self.check_engine)
 
         # ---------- новые профили ----------
         self._h("profiles")
@@ -131,6 +172,11 @@ class SettingsPage(QWidget):
         self._row("warmup", "Список сайтов", "По одному адресу в строке. Прогрев запускается из меню профиля "
                   "или кнопкой с огоньком над таблицей; метка «Новый» меняется на «Готов».", sites)
 
+        # ---------- сценарии ----------
+        self._h("rpa")
+        self._spin("rpa", "Профилей одновременно", "Сколько профилей сценарий выполняет параллельно; остальные ждут "
+                   "очереди. Касается и запуска по расписанию.", "rpa_parallel", 1, 50)
+
         # ---------- внешний вид ----------
         self._h("ui")
         self._combo("ui", "Тема", "Оформление интерфейса. OLED-темы используют чистый чёрный или белый фон.", "theme",
@@ -157,6 +203,27 @@ class SettingsPage(QWidget):
         btn.setCursor(Qt.PointingHandCursor)
         btn.clicked.connect(lambda: os.startfile(str(DATA_DIR)))
         self._row("data", "Папка данных", f"{DATA_DIR}\nЗдесь хранятся база профилей, прокси, настройки и данные браузеров.", btn)
+        bk = QWidget()
+        bkl = QHBoxLayout(bk)
+        bkl.setContentsMargins(0, 0, 0, 0)
+        bkl.setSpacing(6)
+        for text, ico, fn in (("  Создать сейчас", "download", self.backup_now),
+                              ("  Восстановить…", "upload", self.restore_backup),
+                              ("  Папка копий", "folder_open", self.open_backups)):
+            b = QPushButton(text)
+            set_icon(b, ico, "text", 14)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(fn)
+            bkl.addWidget(b)
+        bkl.addStretch()
+        self._row("data", "Резервная копия", "Все профили (с cookies и данными браузера) и прокси в один файл в "
+                  "data/backups. По расписанию — задача «Резервная копия» в Планировщике. «Восстановить» добавляет "
+                  "профили из копии, существующие не меняются.", bk)
+        self._spin("data", "Хранить копий", "Сколько последних резервных копий оставлять; более старые удаляются.",
+                   "backup_keep", 1, 100)
+        self._check("data", "Пароли и 2FA в резервных копиях",
+                    "В базе они зашифрованы ключом Windows этого ПК и на другом компьютере не расшифруются. "
+                    "Если включить, в копию они попадут в открытом виде.", "backup_secrets")
 
         self.body.addStretch()
         self.sidebar.update_lists(self.SECTIONS)
@@ -240,6 +307,78 @@ class SettingsPage(QWidget):
     def _accent_changed(self, _value):
         apply_theme(QApplication.instance())
         self.win.restyle()
+
+    # ---------- движок ----------
+    def check_engine(self, force: bool = False):
+        from ...updates import status
+        from ..workers import run_bg
+        self.engine_state.setText("Проверка версии…")
+
+        def done(st, err):
+            if err:
+                self.engine_state.setText(f"Ошибка проверки: {err}")
+                return
+            self.show_engine_status(st)
+            self.win.engine_status(st)
+
+        run_bg(lambda: status(force), done, self)
+
+    def show_engine_status(self, st: dict):
+        mark = {"ok": "✓", "info": "ℹ", "warn": "⚠", "error": "✗"}[st["level"]]
+        self.engine_state.setText(f"{mark}  {st['message']}")
+        self.update_btn.setText("  Открыть «О браузере Chrome»" if st["engine"] == "chrome" else "  Обновить движок")
+
+    def update_engine(self):
+        from ...engines.chrome_version import engine_kind
+        from ... import updates
+        from ..workers import run_bg
+        if engine_kind() == "chrome":
+            if updates.open_chrome_update():
+                self.win.log("Открыта страница «О браузере Chrome» — Chrome проверит и скачает обновление. "
+                             "Оно применится после закрытия всех окон Chrome.")
+            return
+        if self._engine_busy:
+            return
+        self._engine_busy = True
+        self.update_btn.setEnabled(False)
+        self.engine_state.setText("Обновление Chrome for Testing… это может занять несколько минут")
+        self.win.log("Обновление движка Chrome for Testing…")
+
+        def done(msg, err):
+            self._engine_busy = False
+            self.update_btn.setEnabled(True)
+            self.win.log(f"Ошибка обновления движка: {err}" if err else msg)
+            self.check_engine(force=True)
+
+        run_bg(lambda: updates.update_chromium(), done, self)
+
+    # ---------- резервные копии ----------
+    def backup_now(self):
+        from ...backup import backup_all
+        from ...manager import manager
+        from ..workers import run_bg
+        self.win.log("Резервная копия всех профилей…")
+
+        def done(r, e):
+            self.win.log(f"Ошибка резервной копии: {e}" if e else
+                         f"Резервная копия готова: профилей {r['profiles']}, {r['size'] / 1e6:.1f} МБ → {r['path']}")
+
+        run_bg(lambda: manager.run(backup_all(manager), timeout=7200), done, self)
+
+    def restore_backup(self):
+        from PySide6.QtWidgets import QFileDialog
+        from ...backup import BACKUP_DIR
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        path, _ = QFileDialog.getOpenFileName(self, "Восстановить из копии", str(BACKUP_DIR),
+                                              "Профили claudeAnty (*.caprofile *.zip);;Все (*)")
+        if path:
+            self.win.open_view("profiles")
+            self.win.pages["profiles"].import_profiles(path)
+
+    def open_backups(self):
+        from ...backup import BACKUP_DIR
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(BACKUP_DIR))
 
     # ---------- API страницы ----------
     def scroll_to(self, key: str):

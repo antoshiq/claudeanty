@@ -19,9 +19,14 @@ DEFAULTS = {
     "accent": "blue",
     "theme": "dark",
     "embed_browser": False,
+    "chrome_engine": "chrome",  # chrome — установленный Google Chrome, chromium — Chrome for Testing (Playwright)
+    "update_check": True,  # проверять, не отстаёт ли версия движка
     "warmup_sites": [],  # пусто = встроенный список
     "warmup_count": 8,
     "warmup_dwell": 12,
+    "backup_keep": 10,  # сколько последних резервных копий хранить
+    "backup_secrets": False,  # класть ли пароли и 2FA в резервные копии (в открытом виде)
+    "rpa_parallel": 3,  # сколько профилей сценарий выполняет одновременно
 }
 
 _data: dict = {}

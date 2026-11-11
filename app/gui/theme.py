@@ -152,21 +152,21 @@ QToolButton {{ background: transparent; border: none; border-radius: 5px; paddin
 QToolButton:hover {{ background: {c['toolhover']}; }}
 
 /* ---------- поля ---------- */
-QLineEdit, QPlainTextEdit, QComboBox, QSpinBox {{ background: {c['input']}; border: 1px solid {c['input_border']};
+QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTimeEdit, QDateTimeEdit {{ background: {c['input']}; border: 1px solid {c['input_border']};
     border-radius: 4px; padding: 4px 8px; selection-background-color: {c['select']}; selection-color: {c['select_text']};
     color: {c['text']}; min-height: 18px; }}
-QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus {{ border: 1px solid {c['accent']}; }}
+QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTimeEdit:focus, QDateTimeEdit:focus {{ border: 1px solid {c['accent']}; }}
 QComboBox::drop-down {{ border: none; width: 22px; }}
 QComboBox::down-arrow {{ image: url({chevron}); width: 12px; height: 12px; }}
 QComboBox QAbstractItemView {{ background: {c['menu']}; border: 1px solid {c['menu_border']}; padding: 2px;
     selection-background-color: {c['accent']}; selection-color: #ffffff; outline: none; }}
 QComboBox:disabled, QLineEdit:disabled {{ color: {c['faint']}; background: {c['hover']}; }}
-QSpinBox {{ padding-right: 20px; }}
-QSpinBox::up-button, QSpinBox::down-button {{ subcontrol-origin: border; width: 18px; border: none; background: transparent; }}
-QSpinBox::up-button {{ subcontrol-position: top right; }}
-QSpinBox::down-button {{ subcontrol-position: bottom right; }}
-QSpinBox::up-arrow {{ image: url({chevron_up}); width: 10px; height: 10px; }}
-QSpinBox::down-arrow {{ image: url({chevron}); width: 10px; height: 10px; }}
+QSpinBox, QDoubleSpinBox, QTimeEdit, QDateTimeEdit {{ padding-right: 20px; }}
+QSpinBox::up-button, QDoubleSpinBox::up-button, QTimeEdit::up-button, QDateTimeEdit::up-button, QSpinBox::down-button, QDoubleSpinBox::down-button, QTimeEdit::down-button, QDateTimeEdit::down-button {{ subcontrol-origin: border; width: 18px; border: none; background: transparent; }}
+QSpinBox::up-button, QDoubleSpinBox::up-button, QTimeEdit::up-button, QDateTimeEdit::up-button {{ subcontrol-position: top right; }}
+QSpinBox::down-button, QDoubleSpinBox::down-button, QTimeEdit::down-button, QDateTimeEdit::down-button {{ subcontrol-position: bottom right; }}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow, QTimeEdit::up-arrow, QDateTimeEdit::up-arrow {{ image: url({chevron_up}); width: 10px; height: 10px; }}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow, QTimeEdit::down-arrow, QDateTimeEdit::down-arrow {{ image: url({chevron}); width: 10px; height: 10px; }}
 QCheckBox {{ spacing: 8px; background: transparent; }}
 QCheckBox::indicator {{ width: 14px; height: 14px; border: 1px solid {c['input_border']}; border-radius: 3px; background: {c['input']}; }}
 QCheckBox::indicator:checked {{ background: {c['accent']}; border-color: {c['accent']}; image: url({check}); }}

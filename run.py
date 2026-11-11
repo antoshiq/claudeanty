@@ -15,6 +15,8 @@ def main():
     apply_theme(qt)
     win = MainWindow()
     win.show()
+    from app.manager import manager
+    manager.scheduler.start()
     sys.exit(qt.exec())
 
 

@@ -12,6 +12,8 @@ from . import embed
 from .icons import icon
 from .pages.profiles import ProfilesPage
 from .pages.proxies import ProxiesPage
+from .pages.scenarios_page import ScenariosPage
+from .pages.scheduler_page import SchedulerPage
 from .pages.settings_page import SettingsPage
 from .pages.sync_page import SyncPage
 from .theme import C
@@ -19,7 +21,7 @@ from .tabstrip import TabStrip
 from .widgets import retint, tool
 from .workers import run_bg
 
-VERSION = "1.4"
+VERSION = "1.5"
 GAP = 6  # промежуток между карточками
 
 
@@ -52,7 +54,8 @@ class MainWindow(QMainWindow):
         self.details.setObjectName("console")
         self.details.setReadOnly(True)
         self.msg = QLabel("Готово")
-        self.pages = {cls.key: cls(self) for cls in (ProfilesPage, ProxiesPage, SyncPage, SettingsPage)}
+        self.pages = {cls.key: cls(self) for cls in (ProfilesPage, ProxiesPage, SyncPage, ScenariosPage, SchedulerPage,
+                                                     SettingsPage)}
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, GAP + 2, 0)
@@ -89,6 +92,40 @@ class MainWindow(QMainWindow):
         self.set_refresh_interval(settings.get("refresh_interval"))
         self.log(f"claudeAnty {VERSION} запущен. Локальный API: "
                  + (f"http://{API_HOST}:{API_PORT}" if settings.get("api_enabled") else "выключен"))
+        # события планировщика и сценариев приходят из потока браузеров — забираем их таймером
+        self._event_seq = 0
+        self.event_timer = QTimer(self)
+        self.event_timer.timeout.connect(self._pull_events)
+        self.event_timer.start(700)
+        self._engine_warned = ""
+        self.update_timer = QTimer(self)
+        self.update_timer.timeout.connect(self.check_updates)
+        self.update_timer.start(6 * 3600 * 1000)
+        QTimer.singleShot(2000, self.check_updates)
+
+    def _pull_events(self):
+        new = [(n, t) for n, t in list(manager.scheduler.events) if n > self._event_seq]
+        for n, text in new:
+            self._event_seq = n
+            self.log(text)
+        if new and self.current_key() in ("scheduler", "scenarios", "profiles"):
+            self.current_page().refresh()
+
+    def check_updates(self):
+        if not settings.get("update_check"):
+            return
+        from ..updates import status
+        run_bg(status, lambda st, err: None if err else self.engine_status(st), self)
+
+    def engine_status(self, st: dict):
+        """Версия движка в строке состояния; предупреждение в лог — один раз на каждое новое сообщение."""
+        name = "Chrome" if st["engine"] == "chrome" else "CfT"
+        warn = st["level"] == "warn"
+        self.st_engine.setText(f"{'⚠ ' if warn else ''}{name} {st['version'].split('.')[0]}")
+        self.st_engine.setToolTip(st["message"])
+        if st["level"] in ("warn", "info") and st["message"] != self._engine_warned:
+            self._engine_warned = st["message"]
+            self.log(("Внимание: " if warn else "") + st["message"])
 
     # ================= построение =================
     def _build_titlebar(self):
@@ -147,6 +184,8 @@ class MainWindow(QMainWindow):
         v.addWidget(act("profiles", "users", "Профили (Ctrl+1)", lambda: self._activity_clicked("profiles")))
         v.addWidget(act("proxies", "globe", "Прокси (Ctrl+2)", lambda: self._activity_clicked("proxies")))
         v.addWidget(act("sync", "repeat", "Синхронизатор (Ctrl+3)", lambda: self._activity_clicked("sync")))
+        v.addWidget(act("scenarios", "workflow", "Сценарии (Ctrl+4)", lambda: self._activity_clicked("scenarios")))
+        v.addWidget(act("scheduler", "clock", "Планировщик (Ctrl+5)", lambda: self._activity_clicked("scheduler")))
         v.addStretch()
         self.api_btn = act(None, "plug", "Локальный API — показать адреса", self.api_info)
         v.addWidget(self.api_btn)
@@ -224,6 +263,8 @@ class MainWindow(QMainWindow):
         sb.addWidget(remote)
         sb.addWidget(self.st_running)
         sb.addWidget(self.msg, 1)
+        self.st_engine = QLabel()
+        sb.addPermanentWidget(self.st_engine)
         sb.addPermanentWidget(self.st_count)
         sb.addPermanentWidget(QLabel(f"claudeAnty {VERSION}"))
 
@@ -234,7 +275,8 @@ class MainWindow(QMainWindow):
                          ("Ctrl+,", lambda: self.open_view("settings")), ("Ctrl+W", self._close_current),
                          ("Ctrl+Tab", lambda: self._cycle(1)), ("Ctrl+Shift+Tab", lambda: self._cycle(-1)),
                          ("Ctrl+1", lambda: self.open_view("profiles")), ("Ctrl+2", lambda: self.open_view("proxies")),
-                         ("Ctrl+3", lambda: self.open_view("sync"))):
+                         ("Ctrl+3", lambda: self.open_view("sync")), ("Ctrl+4", lambda: self.open_view("scenarios")),
+                         ("Ctrl+5", lambda: self.open_view("scheduler"))):
             QShortcut(QKeySequence(keys), root, activated=fn, context=Qt.WidgetWithChildrenShortcut)
 
     # ================= вкладки =================

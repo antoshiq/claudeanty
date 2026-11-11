@@ -14,7 +14,7 @@ from ..models import Profile, Proxy
 from ..proxy.relay import UpstreamRelay
 from .base import Engine, RunningSession, free_port
 from .cdp_client import CDPClient
-from .chrome_version import apply_version, engine_version
+from .chrome_version import apply_version, engine_kind, engine_version, executable
 
 log = logging.getLogger("claudeanty.chromium")
 _INJECT = Path(__file__).parent.parent / "fingerprints" / "inject"
@@ -136,6 +136,21 @@ async def open_start_urls(ctx, urls: list[str]):
             log.warning("start url %s: %s", url, e)
 
 
+async def load_extensions(ctx, paths: list[str]):
+    """Распакованные расширения в Google Chrome через CDP (браузерная сессия Playwright идёт по pipe)."""
+    try:
+        cdp = await ctx.browser.new_browser_cdp_session()
+    except Exception as e:  # noqa: BLE001
+        log.warning("extensions: нет CDP-сессии браузера: %s", e)
+        return
+    for path in paths:
+        try:
+            await cdp.send("Extensions.loadUnpacked", {"path": path})
+        except Exception as e:  # noqa: BLE001
+            log.warning("extension %s: %s", path, e)
+    await cdp.detach()
+
+
 class ChromiumEngine(Engine):
     name = "chromium"
 
@@ -177,20 +192,32 @@ class ChromiumEngine(Engine):
             "--disable-blink-features=AutomationControlled",
             *webrtc_args,
             f"--window-size={vp['width'] + (16 if fp['mobile'] else 0)},{vp['height'] + 90}",
-            # без этого Chromium может перестать рисовать, когда окно встроено во вкладку приложения
-            "--disable-features=CalculateNativeWinOcclusion",
+            # CalculateNativeWinOcclusion: без этого Chromium может перестать рисовать, когда окно встроено во
+            # вкладку приложения. IsolateSandboxedIframes: iframe с sandbox (srcdoc) иначе получает свой процесс
+            # без паузы на старте — скрипт в нём успевает прочитать системные таймзону, ядра и язык до эмуляции.
+            # В процессе страницы такой iframe наследует всю эмуляцию; из JS разница процессов не видна.
+            "--disable-features=CalculateNativeWinOcclusion,IsolateSandboxedIframes",
             f"--lang={profile.locale}",
         ]
         if proxy_server:
             args += [f"--proxy-server={proxy_server}", "--proxy-bypass-list=<-loopback>"]
         if headless:
+            # UA по умолчанию у headless — «HeadlessChrome»; CDP-подмена не всегда успевает в SharedWorker,
+            # поэтому задаём UA и флагом (значение то же, что в отпечатке)
+            args.append(f"--user-agent={fp['user_agent']}")
             args += ["--headless", "--hide-scrollbars", "--mute-audio", "--enable-unsafe-swiftshader",
                      # как у обычного ПК: мышь с наведением (иначе headless сообщает «нет указателя»)
                      "--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4"]
         exts = [str(Path(e)) for e in profile.extensions if Path(e, "manifest.json").exists()]
+        chrome = engine_kind() == "chrome"
         if exts:
-            joined = ",".join(exts)
-            args += [f"--load-extension={joined}", f"--disable-extensions-except={joined}"]
+            if chrome:
+                # Google Chrome 137+ игнорирует --load-extension: расширения ставятся после запуска
+                # командой CDP Extensions.loadUnpacked (доступна только по pipe и с этим флагом)
+                args.append("--enable-unsafe-extension-debugging")
+            else:
+                joined = ",".join(exts)
+                args += [f"--load-extension={joined}", f"--disable-extensions-except={joined}"]
         args.append("about:blank")
 
         if not headless:
@@ -205,8 +232,13 @@ class ChromiumEngine(Engine):
             ignore_default_args=True,
             no_viewport=True,
         )
+        exe = executable()
+        if exe:
+            kwargs["executable_path"] = exe  # установленный Google Chrome
 
         ctx = await pw.chromium.launch_persistent_context(**kwargs)
+        if exts and chrome:
+            await load_extensions(ctx, exts)
         # метка нашего скрипта: по ней подмена вырезает свои кадры из стека ошибок
         fp["token"] = "ca" + secrets.token_hex(6)
         fp_json = json.dumps(fp)

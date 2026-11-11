@@ -12,7 +12,7 @@ from .. import db
 from ..config import API_HOST, API_PORT
 from ..fingerprints.generator import DEVICES
 from ..manager import manager
-from ..models import Profile, Proxy
+from ..models import Account, Profile, Proxy
 from ..proxy.checker import check_proxy
 
 app = FastAPI(title="claudeAnty local API")
@@ -29,6 +29,14 @@ def _view(p: Profile) -> dict:
     d = p.model_dump(exclude={"fingerprint"})
     d["running"] = manager.is_running(p.id)
     return d
+
+
+# ---------- движок ----------
+@app.get("/engine")
+def engine_status(force: bool = False):
+    """Движок (chrome | chromium), его версия, последняя стабильная Chrome и предупреждение, если отстаёт."""
+    from ..updates import status
+    return status(force)
 
 
 # ---------- профили ----------
@@ -120,6 +128,14 @@ def check_profile(pid: int):
     return manager.run(run_check(manager, pid), timeout=300)
 
 
+@app.post("/profiles/{pid}/external-check")
+def external_check(pid: int, sites: str = ""):
+    """Отчёт внешних детекторов. sites — через запятую: pixelscan,creepjs,fingerprint,browserleaks (пусто = все)."""
+    from ..external_check import run_external
+    _profile_or_404(pid)
+    return manager.run(run_external(manager, pid, [s for s in sites.split(",") if s] or None), timeout=600)
+
+
 @app.post("/profiles/{pid}/warmup")
 def warmup_profile(pid: int):
     from ..warmup import warmup
@@ -170,6 +186,130 @@ def set_cookies(pid: int, body: CookiesIn):
     except Exception as e:  # noqa: BLE001
         raise HTTPException(400, str(e))
     return {"ok": True, "imported": n}
+
+
+# ---------- пароли и 2FA ----------
+@app.get("/profiles/{pid}/accounts")
+def list_accounts(pid: int):
+    """Аккаунты профиля с паролями и текущими кодами 2FA (API доступен только с этого компьютера)."""
+    from .. import totp
+    _profile_or_404(pid)
+    out = []
+    for a in db.list_accounts(pid):
+        d = a.model_dump()
+        if a.totp:
+            try:
+                d["code"], d["code_remaining"] = totp.code(a.totp), totp.remaining(a.totp)
+            except ValueError as e:
+                d["code_error"] = str(e)
+        out.append(d)
+    return out
+
+
+@app.post("/profiles/{pid}/accounts")
+def add_account(pid: int, acc: Account):
+    _profile_or_404(pid)
+    acc.id, acc.profile_id = None, pid
+    return db.save_account(acc).model_dump()
+
+
+@app.delete("/accounts/{aid}")
+def delete_account(aid: int):
+    db.delete_account(aid)
+    return {"ok": True}
+
+
+@app.get("/accounts/{aid}/totp")
+def account_totp(aid: int):
+    from .. import totp
+    a = db.get_account(aid)
+    if not a or not a.totp:
+        raise HTTPException(404, "account or 2FA secret not found")
+    return {"code": totp.code(a.totp), "remaining": totp.remaining(a.totp)}
+
+
+# ---------- сценарии (RPA) и планировщик ----------
+@app.get("/scenarios")
+def list_scenarios():
+    return db.list_docs("scenarios")
+
+
+@app.post("/scenarios")
+def save_scenario(doc: dict):
+    """{"name": "...", "steps": [{"type": "open", "url": "..."}, ...]} — с "id" обновляет существующий."""
+    from ..rpa import validate
+    err = validate(doc.get("steps", []))
+    if err:
+        raise HTTPException(400, err)
+    return db.save_doc("scenarios", doc)
+
+
+@app.delete("/scenarios/{sid}")
+def delete_scenario(sid: int):
+    db.delete_doc("scenarios", sid)
+    return {"ok": True}
+
+
+class RunIn(BaseModel):
+    profiles: list[int]
+    headless: bool = False
+    close_after: bool = True
+
+
+@app.post("/scenarios/{sid}/run")
+def run_scenario(sid: int, body: RunIn):
+    """Выполняет сценарий на профилях и возвращает результат по каждому (ждёт окончания)."""
+    from ..rpa import jobs
+    if not db.get_doc("scenarios", sid):
+        raise HTTPException(404, "scenario not found")
+    return manager.run(jobs.run_many(manager, sid, body.profiles, body.headless, body.close_after,
+                                     log=manager.scheduler.say), timeout=None)
+
+
+@app.get("/tasks")
+def list_tasks():
+    return db.list_docs("tasks")
+
+
+@app.post("/tasks/{tid}/run")
+def run_task(tid: int):
+    if not db.get_doc("tasks", tid):
+        raise HTTPException(404, "task not found")
+    return {"result": manager.run(manager.scheduler.run_task(tid, manual=True), timeout=None)}
+
+
+# ---------- экспорт/импорт профилей, резервные копии ----------
+class ExportIn(BaseModel):
+    profiles: list[int]
+    path: str  # куда сохранить .caprofile
+    secrets: bool = False  # включить пароли и 2FA (в открытом виде)
+
+
+@app.post("/profiles/export")
+def export_profiles(body: ExportIn):
+    from ..backup import export_profiles as do_export
+    for pid in body.profiles:
+        _profile_or_404(pid)
+    return manager.run(do_export(manager, body.profiles, body.path, include_secrets=body.secrets), timeout=3600)
+
+
+class ImportIn(BaseModel):
+    path: str
+
+
+@app.post("/profiles/import")
+def import_profiles(body: ImportIn):
+    from ..backup import import_archive
+    try:
+        return manager.run(import_archive(manager, body.path), timeout=3600)
+    except (ValueError, KeyError, FileNotFoundError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/backup")
+def backup_now():
+    from ..backup import backup_all
+    return manager.run(backup_all(manager), timeout=7200)
 
 
 # ---------- прокси ----------
