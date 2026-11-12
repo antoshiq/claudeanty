@@ -48,6 +48,8 @@ class Manager:
 
     # ---- профили ----
     def create_profile(self, p: Profile) -> Profile:
+        import time
+        p.created = time.time()
         self._prepare_fingerprint(p)
         return db.save_profile(p)
 
@@ -67,6 +69,8 @@ class Manager:
             p.engine = "chromium"
         if not p.fingerprint:
             p.fingerprint = generate(p.kind, p.os, p.device)
+            if p.kind == "mobile":
+                p.device = p.fingerprint.get("device", p.device)  # «случайное» или неизвестное — реальная модель
         if p.engine == "camoufox" and "camoufox" not in p.fingerprint:
             p.fingerprint["camoufox"] = make_camoufox_fingerprint(p.os)
 
@@ -109,8 +113,15 @@ class Manager:
         self._starting.add(pid)
         try:
             proxy = db.get_proxy(p.proxy_id)
+            if p.proxy_id is not None and proxy is None:  # прокси удалили — без него профиль ушёл бы с вашего IP
+                from . import activity
+                activity.log(pid, "proxy", "прокси профиля удалён — профиль не запущен")
+                raise RuntimeError("Прокси этого профиля удалён — профиль не запущен, чтобы не открыть его с вашего "
+                                   "настоящего IP. Назначьте прокси или выберите «Без прокси» в профиле.")
             if proxy and proxy.change_ip_url and settings.get("change_ip_on_start"):
                 await self._rotate(pid, proxy)
+            if proxy and settings.get("proxy_check_on_start"):
+                await self._preflight(p, proxy)
             await self._resolve_geo(p, proxy)
             udd = PROFILES_DIR / str(pid)
             udd.mkdir(parents=True, exist_ok=True)
@@ -118,9 +129,44 @@ class Manager:
             sess.headless = headless
             self.sessions[pid] = sess
             sess.context.on("close", lambda *_: self.sessions.pop(pid, None))
+            from .banwatch import watch
+            watch(self, pid, sess)
+            from . import activity
+            activity.log(pid, "start", ("без окна" if headless else "с окном") +
+                         (f", прокси {proxy.host}:{proxy.port} {proxy.country} {proxy.ip}".rstrip() if proxy else
+                          ", без прокси") + (f", таймзона {p.timezone}" if p.timezone else ""))
             return sess
         finally:
             self._starting.discard(pid)
+
+    async def _preflight(self, p: Profile, proxy: Proxy):
+        """Прокси перед запуском: не отвечает — профиль не запускается (сайты увидели бы ошибку сети или,
+        хуже, браузер без прокси); сменил страну — предупреждение или отказ (Настройки → Прокси)."""
+        from . import activity
+        if proxy.status == "ok" and time.time() - proxy.checked_at < int(settings.get("proxy_check_cache")) \
+                and proxy.timezone:
+            return
+        before = (proxy.country, proxy.ip)
+        res = await check_proxy(proxy, timeout=15, deep=False)
+        proxy.checked_at = time.time()
+        db.save_proxy(proxy)
+        where = f"{proxy.host}:{proxy.port}"
+        if not res.get("ok"):
+            msg = f"прокси {where} не отвечает ({str(res.get('error'))[:120]}) — профиль не запущен"
+            activity.log(p.id, "proxy", msg)
+            self.scheduler.say(f"#{p.id}: {msg}")
+            raise RuntimeError(msg[0].upper() + msg[1:] + ". Замените прокси или отключите проверку: "
+                                                          "Настройки → Прокси")
+        if before[0] and proxy.country != before[0]:
+            msg = f"прокси {where} сменил страну {before[0]} → {proxy.country} (IP {proxy.ip})"
+            if settings.get("proxy_geo_change") == "block":
+                activity.log(p.id, "proxy", msg + " — профиль не запущен")
+                raise RuntimeError(msg[0].upper() + msg[1:] + ". Профиль не запущен: аккаунт сменил бы страну. "
+                                   "Разрешить: Настройки → Прокси")
+            activity.log(p.id, "proxy", msg)
+            self.scheduler.say(f"#{p.id}: внимание — {msg}")  # гео профиля обновится в _resolve_geo
+        elif before[1] and before[1] != proxy.ip:
+            activity.log(p.id, "proxy", f"IP прокси сменился {before[1]} → {proxy.ip} ({proxy.country})")
 
     async def _rotate(self, pid: int, proxy: Proxy):
         from .proxy.rotate import busy_with, change_ip
@@ -159,6 +205,8 @@ class Manager:
 
     async def set_cookies(self, pid: int, text: str) -> int:
         cookies = ck.parse_cookies(text)
+        if not cookies:  # не запускать браузер ради пустого списка
+            raise ValueError("cookies не найдены: нужен JSON (EditThisCookie) или формат Netscape")
         # сессионные cookies пропали бы при закрытии браузера -> делаем их постоянными (30 дней)
         for c in cookies:
             if "expires" not in c:

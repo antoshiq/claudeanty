@@ -80,7 +80,9 @@
     h = Math.imul(h ^ (h >>> 16), 0x45d9f3b) >>> 0; return (h ^ (h >>> 16)) >>> 0; };
 
   // ---------- память (у CDP нет переопределения deviceMemory) ----------
-  defGet(Navigator.prototype, "deviceMemory", () => FP.memory);
+  // Chrome округляет память и не отдаёт больше 8 ГБ: 16 или 32 в navigator.deviceMemory — заметная ложь.
+  // Если движок отдаёт больше 8 (верхнюю границу подняли), значит потолок другой — тогда как есть.
+  defGet(Navigator.prototype, "deviceMemory", (g, real) => real > 8 ? FP.memory : Math.min(FP.memory, 8));
 
   // ---------- доступная область экрана: панель задач / строка меню ----------
   // Размер экрана задаётся нативно (CDP), но тогда availHeight = height — признак headless («нет панели задач»).
@@ -145,6 +147,21 @@
     noiseData(img.data, img.width);
     return img;
   });
+  // WebGL: прямое чтение пикселей (readPixels) минует toDataURL — без шума картинка WebGL у всех профилей
+  // этого ПК одинаковая, и по ней их можно связать. Шум тот же: детерминированный, только на краях.
+  for (const GL of [window.WebGLRenderingContext, window.WebGL2RenderingContext]) {
+    if (!GL) continue;
+    defMethod(GL.prototype, "readPixels", function (orig, args) {
+      const res = orig.apply(this, args);
+      const dst = args[6], w = args[2];
+      if ((dst instanceof Uint8Array || dst instanceof Uint8ClampedArray) && w > 0 && args[4] === this.RGBA &&
+          args[5] === this.UNSIGNED_BYTE) {
+        const off = typeof args[7] === "number" ? args[7] : 0;
+        noiseData(off ? dst.subarray(off, off + w * args[3] * 4) : dst.subarray(0, w * args[3] * 4), w);
+      }
+      return res;
+    });
+  }
 
   // ---------- audio: шум один раз на буфер (повторное чтение даёт то же самое) ----------
   if (window.AudioBuffer) {

@@ -143,3 +143,14 @@ def empty_label(text: str = "") -> QLabel:
     lbl.setObjectName("emptyState")
     lbl.setAlignment(Qt.AlignCenter)
     return lbl
+
+
+def restore_selection(table, rows) -> None:
+    """Выделить строки rows одним вызовом. selectRow() в режиме множественного выбора сбрасывает остальные
+    строки — при автообновлении таблицы от нескольких выбранных оставалась одна."""
+    from PySide6.QtCore import QItemSelection, QItemSelectionModel
+    sel = QItemSelection()
+    last = table.columnCount() - 1
+    for r in rows:
+        sel.select(table.model().index(r, 0), table.model().index(r, last))
+    table.selectionModel().select(sel, QItemSelectionModel.ClearAndSelect)

@@ -138,7 +138,7 @@ class TaskForm(QWidget):
         self.scenario.setVisible(action == "scenario")
         self.scenario_lbl.setVisible(action == "scenario")
         self.headless.setVisible(action in ("scenario", "start"))
-        targets = action != "backup"
+        targets = action not in ("backup", "engine_check")
         self.mode.setVisible(targets)
         self.mode_lbl.setVisible(targets)
         self.ids.setVisible(targets and mode == "ids")
@@ -186,7 +186,7 @@ class TaskForm(QWidget):
         t = self.result()
         if t["action"] == "scenario" and not t.get("scenario_id"):
             return "Сначала создайте сценарий на вкладке «Сценарии»"
-        if t["action"] != "backup":
+        if t["action"] not in ("backup", "engine_check"):
             m = t["targets"]["mode"]
             if m == "ids" and not t["targets"]["ids"]:
                 return "Отметьте хотя бы один профиль"

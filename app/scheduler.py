@@ -23,12 +23,15 @@ log = logging.getLogger("claudeanty.scheduler")
 
 ACTIONS = {
     "warmup": "Прогреть cookies",
+    "warm_plan": "День плана прогрева",
     "scenario": "Выполнить сценарий",
     "check": "Проверить отпечаток",
     "external": "Отчёт внешних детекторов",
+    "health": "Здоровье: отпечаток + детекторы",
     "start": "Запустить профили",
     "stop": "Остановить профили",
     "backup": "Резервная копия всех профилей",
+    "engine_check": "Автопроверка образцов (как после обновления Chrome)",
 }
 WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 GRACE = 30  # минут
@@ -95,7 +98,7 @@ def resolve_targets(task: dict) -> list[int]:
 def describe_targets(task: dict) -> str:
     t = task.get("targets") or {}
     mode = t.get("mode", "ids")
-    if task.get("action") == "backup":
+    if task.get("action") in ("backup", "engine_check"):
         return "все профили"
     if mode == "all":
         return "все профили"
@@ -143,6 +146,11 @@ class Scheduler:
 
     async def tick(self):
         now = time.time()
+        try:
+            from . import enginewatch
+            asyncio.ensure_future(enginewatch.poll(self.m, self.say))  # сама решает, пора ли (раз в 10 мин)
+        except Exception:  # noqa: BLE001
+            log.exception("enginewatch")
         for t in db.list_docs("tasks"):
             if not t.get("enabled", True) or t["id"] in self.running:
                 continue
@@ -186,6 +194,10 @@ class Scheduler:
 
     async def _do(self, t: dict) -> str:
         action = t["action"]
+        if action == "engine_check":
+            from . import enginewatch
+            r = await enginewatch.run(self.m, progress=self.say)
+            return ("⚠ стало хуже: " if r["worse"] else "") + r["text"].splitlines()[0]
         if action == "backup":
             from .backup import backup_all
             r = await backup_all(self.m, progress=self.say)
@@ -218,6 +230,27 @@ class Scheduler:
                 r = await run_external(self.m, pid, progress=self.say)
                 fails += 1 if r["fail"] else 0
             return f"отчёты готовы: {len(pids)}, с ✗: {fails}"
+        if action == "warm_plan":
+            from .warmplan import due, run_day
+            todo = [pid for pid in pids if (p := db.get_profile(pid)) and due(p)]
+            if not todo:
+                return "на сегодня нечего: у профилей нет плана или день уже выполнен"
+            res = await asyncio.gather(*(run_day(self.m, pid, log=self.say) for pid in todo), return_exceptions=True)
+            ok = [r for r in res if isinstance(r, dict) and r.get("day")]
+            fin = sum(1 for r in ok if r.get("finished"))
+            errs = len(todo) - len(ok)
+            return f"день плана выполнен у {len(ok)} из {len(todo)}" + (f", план завершён у {fin}" if fin else "") + \
+                (f", ошибок {errs}" if errs else "")
+        if action == "health":
+            from .check import run_check
+            from .external_check import run_external
+            worse, fails = 0, 0
+            for pid in pids:
+                a = await run_check(self.m, pid)
+                b = await run_external(self.m, pid, progress=self.say)
+                worse += bool(a["worse"] or b["worse"])
+                fails += bool(a["fail"] or b["fail"])
+            return f"проверено {len(pids)}, с ✗: {fails}, стало хуже: {worse}"
         if action == "start":
             headless = bool(t.get("headless", False))
             for pid in pids:

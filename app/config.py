@@ -1,7 +1,6 @@
-from pathlib import Path
+from .paths import APP_DIR, DATA_DIR
 
-ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data"
+ROOT = APP_DIR
 PROFILES_DIR = DATA_DIR / "profiles"
 DB_PATH = DATA_DIR / "claudeanty.sqlite"
 API_HOST = "127.0.0.1"

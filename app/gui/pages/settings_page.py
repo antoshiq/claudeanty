@@ -48,9 +48,11 @@ class SettingsPage(QWidget):
     search_hint = "Поиск настроек"
 
     SECTIONS = [("engine", "Движок", "shield"), ("profiles", "Новые профили", "users"), ("browser", "Поведение", "monitor"),
+                ("health", "Здоровье и бан", "activity"),
                 ("proxies", "Прокси", "globe"), ("warmup", "Прогрев cookies", "flame"), ("rpa", "Сценарии", "workflow"),
                 ("ui", "Внешний вид", "layers"),
-                ("api", "Локальный API", "plug"), ("notify", "Уведомления", "bell"), ("data", "Данные", "folder")]
+                ("api", "Локальный API", "plug"), ("notify", "Уведомления", "bell"), ("data", "Данные", "folder"),
+                ("about", "О программе", "download")]
 
     def __init__(self, win):
         super().__init__()
@@ -128,6 +130,35 @@ class SettingsPage(QWidget):
         self._check("engine", "Следить за обновлениями",
                     "При запуске и раз в 6 часов сверять версию движка с актуальной стабильной и предупреждать, "
                     "если он отстаёт.", "update_check")
+        self._check("engine", "Автопроверка после обновления",
+                    "Когда версия Chrome сменилась (Chrome обновился сам или нажата «Обновить движок»), профили-образцы "
+                    "без окна проходят встроенную проверку и проверку уникальности; результат и сравнение с прошлой "
+                    "проверкой — в Telegram (событие «Chrome обновился»). Работает, пока открыт claudeAnty.",
+                    "engine_watch")
+        wbox = QWidget()
+        wv = QVBoxLayout(wbox)
+        wv.setContentsMargins(0, 0, 0, 0)
+        wv.setSpacing(6)
+        self.watch_state = QLabel()
+        self.watch_state.setObjectName("settingDesc")
+        self.watch_state.setWordWrap(True)
+        self.watch_state.setMinimumWidth(460)
+        wbtns = QHBoxLayout()
+        wbtns.setSpacing(6)
+        for text, ico, fn in (("  Выбрать образцы…", "users", self.pick_watch_profiles),
+                              ("  Проверить сейчас", "fingerprint", self.run_engine_watch)):
+            b = QPushButton(text)
+            set_icon(b, ico, "text", 14)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(fn)
+            wbtns.addWidget(b)
+        wbtns.addStretch()
+        wv.addWidget(self.watch_state)
+        wv.addLayout(wbtns)
+        self._row("engine", "Профили-образцы", "На них проверяется маскировка после обновления. Лучше выбрать "
+                  "по одному профилю каждого вида (ПК, телефон) с рабочим прокси. Не выбраны — берутся автоматически.",
+                  wbox)
+        self._show_watch_state()
         self._engine_busy = False
         QTimer.singleShot(300, self.check_engine)
 
@@ -137,8 +168,12 @@ class SettingsPage(QWidget):
                     [("Компьютер", "desktop"), ("Телефон (Android)", "mobile")])
         self._combo("profiles", "Движок по умолчанию", "Для профилей-компьютеров. Телефоны всегда используют Chromium.",
                     "default_engine", [("Chromium", "chromium"), ("Camoufox (Firefox)", "camoufox")])
-        self._combo("profiles", "ОС по умолчанию", "Операционная система в отпечатке нового ПК-профиля.", "default_os",
-                    [("Windows", "windows"), ("macOS", "macos"), ("Linux", "linux")])
+        from ...hostos import TITLES, host_os
+        self._combo("profiles", "ОС по умолчанию", "Операционная система в отпечатке нового ПК-профиля. Надёжнее всего — "
+                    f"ОС этого компьютера ({TITLES[host_os()]}): браузер рисует текст и canvas шрифтами и рендером ПК, "
+                    "поэтому профиль на другой ОС заметнее, а fingerprint.com помечает его «Browser Tampering».",
+                    "default_os", [(t + ("  — как у этого ПК" if k == host_os() else ""), k)
+                                   for t, k in (("Windows", "windows"), ("macOS", "macos"), ("Linux", "linux"))])
         self._combo("profiles", "Телефон по умолчанию", "Модель устройства для новых мобильных профилей.",
                     "default_device", [("Случайное устройство", "")] + [(v["label"], k) for k, v in DEVICES.items()])
         self._check("profiles", "Гео по IP прокси", "Подставлять таймзону, язык и геолокацию из IP прокси при запуске.",
@@ -155,13 +190,75 @@ class SettingsPage(QWidget):
         if not EMBED_SUPPORTED:
             emb.setEnabled(False)
             emb.setText("Недоступно: работает только в Windows")
+        self._check("browser", "Спрашивать перед запуском без прокси",
+                    "Профиль без прокси открывает сайты с вашего настоящего IP, и все такие профили оказываются на "
+                    "одном адресе. Перед запуском из интерфейса — вопрос (планировщик и API не спрашивают).",
+                    "warn_no_proxy")
         self._check("browser", "Подтверждать удаление", "Спрашивать перед удалением профилей и прокси.", "confirm_delete")
+
+        # ---------- здоровье и бан ----------
+        self._h("health")
+        from ... import banwatch
+        self._check("health", "Авто-метка «Бан»",
+                    "Пока профиль запущен (в том числе в сценарии и без окна), после каждого перехода страница "
+                    "сверяется с правилами ниже. Сработало — метка «Бан», причина видна в подсказке метки и в панели "
+                    "«Отпечаток», уведомление в Telegram. Сайт этих проверок не видит.", "ban_watch")
+        rules_box = QWidget()
+        rl = QVBoxLayout(rules_box)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(6)
+        rules_ed = QPlainTextEdit(banwatch.format_rules(banwatch.rules()))
+        rules_ed.setMinimumWidth(560)
+        rules_ed.setFixedHeight(200)
+        rules_err = QLabel()
+        rules_err.setObjectName("modalError")
+        rules_err.setWordWrap(True)
+        rules_err.hide()
+        reset = QPushButton("  Встроенные правила")
+        set_icon(reset, "refresh", "text", 14)
+        reset.setCursor(Qt.PointingHandCursor)
+        rl.addWidget(rules_ed)
+        rl.addWidget(rules_err)
+        rl.addWidget(reset, 0, Qt.AlignLeft)
+        rtimer = QTimer(self)
+        rtimer.setSingleShot(True)
+        rtimer.setInterval(800)
+
+        def save_rules():
+            try:
+                parsed = banwatch.parse_rules(rules_ed.toPlainText())
+            except ValueError as e:
+                rules_err.setText(f"Не сохранено: {e}")
+                rules_err.show()
+                return
+            rules_err.hide()
+            value = None if parsed == banwatch.DEFAULT_RULES else parsed
+            if value != settings.get("ban_rules"):
+                self._saved("ban_rules", value)
+
+        rtimer.timeout.connect(save_rules)
+        rules_ed.textChanged.connect(rtimer.start)
+        reset.clicked.connect(lambda: rules_ed.setPlainText(banwatch.format_rules(banwatch.DEFAULT_RULES)))
+        self._row("health", "Признаки бана", "По правилу в строке: «сайт | вид | значение». Виды: url — адрес "
+                  "содержит строку; text — на странице есть текст (регистр не важен); captcha — капча на этом сайте "
+                  "N запусков профиля подряд. Сайт включает поддомены: facebook.com = m.facebook.com. "
+                  "Строки с # — комментарии.", rules_box)
 
         # ---------- прокси ----------
         self._h("proxies")
         self._check("proxies", "Проверять после добавления",
                     "Сразу проверять новые прокси: страна, таймзона, тип IP (резидентный, мобильный, хостинг) "
                     "и ОС по TCP/IP-отпечатку.", "check_proxy_on_add")
+        self._check("proxies", "Проверять прокси перед запуском",
+                    "Перед каждым запуском профиля (и в сценариях, проверках, прогреве) прокси проверяется. Не "
+                    "отвечает — профиль не запускается: лучше не открыть аккаунт, чем открыть его с ошибкой сети. "
+                    "Смена IP и страны пишется в журнал активности профиля.", "proxy_check_on_start")
+        self._spin("proxies", "Не перепроверять, сек", "Прокси, проверенный недавно, перед запуском не проверяется "
+                   "снова — массовый запуск не ждёт десятки одинаковых проверок.", "proxy_check_cache", 0, 3600)
+        self._combo("proxies", "Если прокси сменил страну",
+                    "Ротационный прокси выдал IP другой страны: аккаунт «переехал бы». Предупредить — запустить, "
+                    "написать в журнал и в лог (таймзона и язык подстроятся по IP); не запускать — остановиться.",
+                    "proxy_geo_change", [("Предупредить и запустить", "warn"), ("Не запускать профиль", "block")])
         self._check("proxies", "Менять IP мобильного прокси перед запуском",
                     "Если у прокси задана ссылка смены IP (меню прокси → «Ссылка смены IP…»), она открывается перед "
                     "запуском профиля. Не срабатывает, если прокси занят другим запущенным профилем.",
@@ -200,6 +297,18 @@ class SettingsPage(QWidget):
                     "captcha_provider", [("2captcha", "2captcha"), ("CapSolver", "capsolver")])
         self._secret("rpa", "Ключ сервиса капч", "API-ключ из личного кабинета 2captcha / CapSolver.", "captcha_key",
                      check=("Проверить баланс", self._captcha_balance))
+        self._combo("rpa", "Сервис SMS", "Для шагов «Получить номер» и «Ждать SMS». sms-activate — и любые сервисы с "
+                    "совместимым API (адрес ниже).", "sms_provider",
+                    [("5sim", "5sim"), ("sms-activate (совместимый API)", "sms-activate")])
+        self._secret("rpa", "Ключ сервиса SMS", "API-ключ из личного кабинета 5sim (токен API) или sms-activate.",
+                     "sms_key", check=("Проверить баланс", self._sms_balance))
+        from PySide6.QtWidgets import QLineEdit
+        sms_url = QLineEdit(settings.get("sms_activate_url"))
+        sms_url.setMinimumWidth(460)
+        sms_url.editingFinished.connect(lambda: sms_url.text().strip() != settings.get("sms_activate_url") and
+                                        self._saved("sms_activate_url", sms_url.text().strip()))
+        self._row("rpa", "Адрес API sms-activate", "handler_api.php сервиса с протоколом sms-activate "
+                  "(getNumber / getStatus / setStatus). Для 5sim не используется.", sms_url)
 
         # ---------- внешний вид ----------
         self._h("ui")
@@ -219,6 +328,10 @@ class SettingsPage(QWidget):
                     "api_enabled")
         self._spin("api", "Порт", f"Сейчас API работает на порту {API_PORT}. Новый порт применится после перезапуска.",
                    "api_port", 1024, 65535)
+        self._secret("api", "Ключ API", "Если задан, API принимает только запросы с заголовком X-API-Key: <ключ> "
+                     "(или ?token=<ключ>). Запросы со страниц сайтов отклоняются всегда, но ключ защищает и от "
+                     "других программ на этом ПК. Пусто — без ключа. Действует сразу.", "api_token",
+                     check=("Сгенерировать", self._gen_token))
 
         # ---------- уведомления ----------
         self._h("notify")
@@ -268,9 +381,58 @@ class SettingsPage(QWidget):
                   "профили из копии, существующие не меняются.", bk)
         self._spin("data", "Хранить копий", "Сколько последних резервных копий оставлять; более старые удаляются.",
                    "backup_keep", 1, 100)
+        self._combo("data", "Шифрование резервных копий",
+                    "Ключ Windows — копию откроет только этот ПК под этой учётной записью (если ПК сломается — не "
+                    "откроет никто). Пароль — копия откроется где угодно с паролем: задайте его ниже и запомните. "
+                    "Без шифрования cookies (и пароли, если включены) лежат в копии открытым текстом.",
+                    "backup_encryption", [("Ключом Windows этого ПК", "dpapi"), ("Паролем", "password"),
+                                          ("Без шифрования", "none")])
+        self._secret("data", "Пароль резервных копий", "Для шифрования паролем. Хранится в настройках зашифрованным "
+                     "ключом Windows. Забытый пароль не восстановить — копии станут бесполезны.", "backup_password")
         self._check("data", "Пароли и 2FA в резервных копиях",
                     "В базе они зашифрованы ключом Windows этого ПК и на другом компьютере не расшифруются. "
-                    "Если включить, в копию они попадут в открытом виде.", "backup_secrets")
+                    "Если включить, они попадут в копию — зашифрованными вместе с ней (или открытым текстом, если "
+                    "шифрование выключено).", "backup_secrets")
+
+        # ---------- о программе / обновление ----------
+        self._h("about")
+        from ... import __version__, selfupdate
+        ub = QWidget()
+        uv = QVBoxLayout(ub)
+        uv.setContentsMargins(0, 0, 0, 0)
+        uv.setSpacing(6)
+        self.app_state = QLabel(f"claudeAnty {__version__} · " + {
+            "installer": "установленная версия", "git": "запуск из исходников (git)",
+            "source": "запуск из исходников"}[selfupdate.mode()])
+        self.app_state.setObjectName("settingDesc")
+        self.app_state.setWordWrap(True)
+        self.app_state.setMinimumWidth(460)
+        ubtns = QHBoxLayout()
+        ubtns.setSpacing(6)
+        self.app_check_btn = QPushButton("  Проверить обновления")
+        set_icon(self.app_check_btn, "refresh", "text", 14)
+        self.app_check_btn.clicked.connect(lambda: self.check_app_update(force=True))
+        self.app_update_btn = QPushButton("  Обновить")
+        self.app_update_btn.setObjectName("primary")
+        self.app_update_btn.clicked.connect(self.install_app_update)
+        self.app_skip_btn = QPushButton("Пропустить эту версию")
+        self.app_skip_btn.clicked.connect(self.skip_app_update)
+        for b in (self.app_check_btn, self.app_update_btn, self.app_skip_btn):
+            b.setCursor(Qt.PointingHandCursor)
+            ubtns.addWidget(b)
+        ubtns.addStretch()
+        self.app_update_btn.hide()
+        self.app_skip_btn.hide()
+        uv.addWidget(self.app_state)
+        uv.addLayout(ubtns)
+        self._row("about", "Версия и обновление",
+                  "Установленная версия обновляется установщиком из релиза на GitHub (контрольная сумма SHA-256 "
+                  "проверяется); данные профилей при этом не трогаются. При запуске из исходников — git pull и "
+                  "зависимости.", ub)
+        self._check("about", "Проверять обновления claudeAnty", "Раз в сутки смотреть, вышла ли новая версия, и "
+                    "показывать кнопку в строке состояния. Без вашего нажатия ничего не устанавливается.",
+                    "self_update_check")
+        self._app_release = None
 
         self.body.addStretch()
         self.sidebar.update_lists(self.SECTIONS)
@@ -318,9 +480,13 @@ class SettingsPage(QWidget):
         self.rows.append((row, f"{cat} {title} {desc}".lower()))
         return row
 
+    _SECRETS = {"tg_token", "tg_chat", "captcha_key", "sms_key", "api_token", "backup_password"}
+
     def _saved(self, key, value, on_change=None):
         settings.set(key, value)
-        self.win.log(f"Настройка сохранена: {key} = {value}")
+        shown = ("••••" + str(value)[-4:] if value else "пусто") if key in self._SECRETS else \
+            (f"{len(value)} правил" if key == "ban_rules" and value else value)
+        self.win.log(f"Настройка сохранена: {key} = {shown}")
         if on_change:
             on_change(value)
 
@@ -359,6 +525,7 @@ class SettingsPage(QWidget):
         bl.setSpacing(6)
         ed = QLineEdit(settings.get(key) or "")
         ed.setEchoMode(QLineEdit.Password)
+        ed.setProperty("settingKey", key)
         ed.setMinimumWidth(360)
         ed.editingFinished.connect(lambda: settings.get(key) != ed.text().strip() and self._saved(key, ed.text().strip()))
         bl.addWidget(ed)
@@ -395,6 +562,24 @@ class SettingsPage(QWidget):
         from ..workers import run_bg
         run_bg(lambda: manager.run(balance()), lambda r, e: self.win.log(
             f"Сервис капч: ошибка — {e}" if e else f"Баланс {settings.get('captcha_provider')}: {r:.2f} $"), self)
+
+    def _gen_token(self):
+        import secrets
+        from PySide6.QtWidgets import QLineEdit
+        token = secrets.token_urlsafe(24)
+        self._saved("api_token", token)
+        for ed in self.findChildren(QLineEdit):
+            if ed.echoMode() == QLineEdit.Password and ed.property("settingKey") == "api_token":
+                ed.setText(token)
+        QApplication.clipboard().setText(token)
+        self.win.log("Новый ключ API скопирован в буфер обмена")
+
+    def _sms_balance(self):
+        from ...sms import balance
+        from ...manager import manager
+        from ..workers import run_bg
+        run_bg(lambda: manager.run(balance()), lambda r, e: self.win.log(
+            f"Сервис SMS: ошибка — {e}" if e else f"Баланс {settings.get('sms_provider')}: {r:.2f}"), self)
 
     def _accent_changed(self, _value):
         apply_theme(QApplication.instance())
@@ -443,6 +628,134 @@ class SettingsPage(QWidget):
             self.check_engine(force=True)
 
         run_bg(lambda: updates.update_chromium(), done, self)
+
+    # ---------- автопроверка после обновления ----------
+    def _show_watch_state(self):
+        from ... import db, enginewatch
+        chosen = settings.get("engine_watch_profiles") or []
+        pids = enginewatch.sample_profiles()
+        names = ", ".join(f"#{i} {p.name}" for i in pids if (p := db.get_profile(i))) or "нет подходящих профилей"
+        text = f"{'Выбраны' if chosen else 'Автоматически'}: {names}. Версия, с которой сравниваем: " \
+               f"{settings.get('engine_seen_version') or '—'}."
+        last = settings.get("engine_watch_last") or {}
+        if last:
+            text += f"\nПоследняя автопроверка {last.get('time', '')} (Chrome {last.get('version', '?')}): " + \
+                    ("⚠ стало хуже" if last.get("worse") else "без ухудшений")
+        self.watch_state.setText(text)
+
+    def pick_watch_profiles(self):
+        from PySide6.QtWidgets import QListWidget, QListWidgetItem
+        from ... import db
+        from ..modal import Modal
+        chosen = set(settings.get("engine_watch_profiles") or [])
+        lst = QListWidget()
+        lst.setMinimumHeight(260)
+        for p in db.list_profiles():
+            if p.engine != "chromium":
+                continue
+            it = QListWidgetItem(f"#{p.id}  {p.name}  ({'телефон' if p.kind == 'mobile' else 'ПК'})")
+            it.setData(Qt.UserRole, p.id)
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked if p.id in chosen else Qt.Unchecked)
+            lst.addItem(it)
+        if not Modal(self.win, "Профили-образцы", lst, ok_text="Сохранить", width=480).exec():
+            return
+        ids = [lst.item(i).data(Qt.UserRole) for i in range(lst.count()) if lst.item(i).checkState() == Qt.Checked]
+        self._saved("engine_watch_profiles", ids)
+        self._show_watch_state()
+
+    def run_engine_watch(self):
+        from ... import enginewatch
+        from ...manager import manager
+        from ..workers import run_bg
+        self.watch_state.setText("Проверка образцов… (каждый запускается без окна на ~10–20 секунд)")
+        self.win.log("Автопроверка профилей-образцов…")
+
+        def done(r, e):
+            if e:
+                self.win.log(f"Автопроверка: {e}")
+            else:
+                self.win.log(r["text"])
+            self._show_watch_state()
+
+        run_bg(lambda: manager.run(enginewatch.run(manager, progress=manager.scheduler.say), timeout=1800), done, self)
+
+    # ---------- обновление claudeAnty ----------
+    def check_app_update(self, force: bool = False):
+        from ... import selfupdate
+        from ..workers import run_bg
+        self.app_check_btn.setEnabled(False)
+        self.app_state.setText("Проверка обновлений…")
+
+        def done(res, err):
+            self.app_check_btn.setEnabled(True)
+            if err:
+                self.app_state.setText(f"Ошибка проверки: {err}")
+                return
+            selfupdate.remember(res)
+            self._app_release = res
+            text = res["message"]
+            if res["available"] and res["release"].get("notes"):
+                text += "\n\nЧто нового:\n" + res["release"]["notes"][:800]
+            self.app_state.setText(text)
+            can = res["available"] and (res["mode"] == "git" or (res["mode"] == "installer"
+                                                                  and res["release"].get("asset_url")))
+            self.app_update_btn.setVisible(bool(can))
+            self.app_skip_btn.setVisible(bool(res["available"]))
+            self.win._show_update_notice(selfupdate.pending_notice())
+
+        run_bg(lambda: selfupdate.check(force), done, self)
+
+    def skip_app_update(self):
+        if self._app_release and self._app_release.get("latest"):
+            self._saved("self_update_skip", self._app_release["latest"])
+            self.app_update_btn.hide()
+            self.app_skip_btn.hide()
+            self.win._show_update_notice(None)
+
+    def install_app_update(self):
+        from ... import selfupdate
+        from ...manager import manager
+        from ..modal import confirm
+        from ..workers import run_bg
+        res = self._app_release
+        if not res or not res.get("available"):
+            return
+        if res["mode"] == "git":
+            self.app_update_btn.setEnabled(False)
+
+            def done_git(msg, err):
+                self.app_update_btn.setEnabled(True)
+                self.app_state.setText(f"Ошибка обновления: {err}" if err else msg)
+                self.win.log(f"Обновление claudeAnty: {err or msg}")
+
+            run_bg(lambda: selfupdate.update_source(manager.scheduler.say), done_git, self)
+            return
+        running = list(manager.sessions)
+        text = f"Скачать и установить claudeAnty {res['latest']}? После загрузки программа закроется и запустится снова."
+        if running:
+            text += f"\n\nЗапущено профилей: {len(running)} — они будут остановлены (cookies сохраняются)."
+        if not confirm(self.win, "Обновление claudeAnty", text, ok_text="Обновить", danger=False):
+            return
+        self.app_update_btn.setEnabled(False)
+        self.app_check_btn.setEnabled(False)
+
+        def done(exe, err):
+            if err:
+                self.app_update_btn.setEnabled(True)
+                self.app_check_btn.setEnabled(True)
+                self.app_state.setText(f"Ошибка обновления: {err}")
+                self.win.log(f"Обновление claudeAnty: {err}")
+                return
+            self.win.log("Установщик проверен (SHA-256 совпал), запускаю и закрываю claudeAnty…")
+            try:
+                manager.run(manager.stop_all(), timeout=60)
+            except Exception:  # noqa: BLE001
+                pass
+            selfupdate.run_installer(exe)
+            QApplication.instance().quit()
+
+        run_bg(lambda: selfupdate.download_installer(res["release"], manager.scheduler.say), done, self)
 
     # ---------- резервные копии ----------
     def backup_now(self):

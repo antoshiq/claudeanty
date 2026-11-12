@@ -205,6 +205,18 @@ async def run_check(manager, pid: int) -> dict:
                 f"прокси: {proxy.tcp_os}" + (f", MTU {proxy.mtu}" if proxy.mtu else "") +
                 ("" if mt else " — сайты с анализом сетевого стека видят другую ОС; возьмите прокси на той же ОС"))
 
+        from .hostos import TITLES, host_os, mismatch, warning
+        if p.kind != "mobile":
+            add("warn" if mismatch(p.kind, p.os) else True, "ОС профиля совпадает с ОС компьютера",
+                warning(p.kind, p.os) or f"{TITLES[host_os()]} — шрифты и рендер canvas настоящие")
+
+        rend = (p.fingerprint.get("webgl") or {}).get("renderer", "")
+        if p.engine == "chromium" and p.kind != "mobile" and "Direct3D11" in rend:
+            fresh = "(0x" in rend
+            add(True if fresh else "warn", "Название видеокарты в формате текущего Chrome",
+                rend if fresh else f"{rend} — нынешний Chrome на Windows пишет код устройства «(0x0000…)»; "
+                                   "сгенерируйте отпечаток заново (сайт увидит смену видеокарты)")
+
         m, w = d["main"], d.get("worker")
         # 1. версия Chrome = движок
         if p.engine == "chromium":
@@ -291,6 +303,9 @@ async def run_check(manager, pid: int) -> dict:
     result = {"time": time.strftime("%Y-%m-%d %H:%M"), "items": items,
               "ok": sum(1 for s, *_ in items if s == "ok"), "total": len(items),
               "fail": sum(1 for s, *_ in items if s == "fail")}
+    from . import activity, health
+    activity.log(pid, "check", f"проверка отпечатка: ✓ {result['ok']} из {result['total']}, ✗ {result['fail']}")
+    result["worse"] = [t for _, t, *_ in health.record(pid, "check", result)["worse"]]
     p = db.get_profile(pid)
     if p:
         p.last_check = result

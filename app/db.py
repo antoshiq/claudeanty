@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS scenarios(
   id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tasks(
   id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS health(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, profile_id INTEGER NOT NULL, ts REAL NOT NULL, kind TEXT NOT NULL,
+  ok INTEGER NOT NULL, warn INTEGER NOT NULL, fail INTEGER NOT NULL, items TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS health_profile ON health(profile_id, ts);
 """)
 _conn.commit()
 
@@ -79,10 +83,20 @@ def list_profiles() -> list[Profile]:
     return [Profile(**json.loads(r["data"])) for r in rows]
 
 
+def next_number(base: str) -> int:
+    """Следующий свободный номер для названий «base N»."""
+    import re
+    rx = re.compile(rf"^{re.escape(base)}\s*(\d+)$")
+    nums = [int(m.group(1)) for p in list_profiles() if (m := rx.match(p.name.strip()))]
+    return max(nums, default=0) + 1
+
+
 def delete_profile(pid: int):
     with _lock:
         _conn.execute("DELETE FROM profiles WHERE id=?", (pid,))
         _conn.execute("DELETE FROM accounts WHERE profile_id=?", (pid,))
+        _conn.execute("DELETE FROM health WHERE profile_id=?", (pid,))
+        _conn.execute("DELETE FROM activity WHERE profile_id=?", (pid,))
         _conn.commit()
 
 
@@ -174,4 +188,68 @@ def delete_doc(table: str, ident: int):
     assert table in ("scenarios", "tasks")
     with _lock:
         _conn.execute(f"DELETE FROM {table} WHERE id=?", (ident,))
+        _conn.commit()
+
+
+# --- здоровье профилей: история проверок и отчётов детекторов ---
+def add_health(pid: int, ts: float, kind: str, ok: int, warn: int, fail: int, items: list) -> None:
+    with _lock:
+        _conn.execute("INSERT INTO health(profile_id, ts, kind, ok, warn, fail, items) VALUES(?,?,?,?,?,?,?)",
+                      (pid, ts, kind, ok, warn, fail, json.dumps(items, ensure_ascii=False)))
+        _conn.commit()
+
+
+def list_health(pid: Optional[int] = None, since: float = 0, kind: Optional[str] = None) -> list[dict]:
+    """Записи по возрастанию времени: {"profile_id", "ts", "kind", "ok", "warn", "fail", "items"}."""
+    sql, args = "SELECT profile_id, ts, kind, ok, warn, fail, items FROM health WHERE ts >= ?", [since]
+    if pid is not None:
+        sql += " AND profile_id = ?"
+        args.append(pid)
+    if kind:
+        sql += " AND kind = ?"
+        args.append(kind)
+    with _lock:
+        rows = _conn.execute(sql + " ORDER BY ts, id", args).fetchall()
+    return [{**dict(r), "items": json.loads(r["items"])} for r in rows]
+
+
+def health_profiles() -> set[int]:
+    with _lock:
+        return {r[0] for r in _conn.execute("SELECT DISTINCT profile_id FROM health").fetchall()}
+
+
+# --- журнал активности профилей ---
+_conn.executescript("""
+CREATE TABLE IF NOT EXISTS activity(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, profile_id INTEGER NOT NULL, ts REAL NOT NULL, kind TEXT NOT NULL,
+  text TEXT NOT NULL, data TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS activity_profile ON activity(profile_id, ts);
+""")
+
+
+def add_activity(pid: int, ts: float, kind: str, text: str, data: dict) -> None:
+    with _lock:
+        _conn.execute("INSERT INTO activity(profile_id, ts, kind, text, data) VALUES(?,?,?,?,?)",
+                      (pid, ts, kind, text, json.dumps(data, ensure_ascii=False)))
+        _conn.commit()
+
+
+def list_activity(pid: Optional[int] = None, since: float = 0, kind: Optional[str] = None,
+                  limit: int = 500) -> list[dict]:
+    """Записи журнала, новые первыми."""
+    sql, args = "SELECT id, profile_id, ts, kind, text, data FROM activity WHERE ts >= ?", [since]
+    if pid is not None:
+        sql += " AND profile_id = ?"
+        args.append(pid)
+    if kind:
+        sql += " AND kind = ?"
+        args.append(kind)
+    with _lock:
+        rows = _conn.execute(sql + " ORDER BY ts DESC, id DESC LIMIT ?", [*args, limit]).fetchall()
+    return [{**dict(r), "data": json.loads(r["data"])} for r in rows]
+
+
+def cleanup_activity(before: float) -> None:
+    with _lock:
+        _conn.execute("DELETE FROM activity WHERE ts < ?", (before,))
         _conn.commit()

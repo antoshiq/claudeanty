@@ -176,8 +176,8 @@ class ProxiesPage(QWidget):
                 elif c in (3, 6, 9):
                     item.setForeground(QColor(C["muted"]))
                 self.table.setItem(r, c, item)
-            if p.id in sel:
-                self.table.selectRow(r)
+        from ..widgets import restore_selection
+        restore_selection(self.table, [r for r, p in enumerate(rows) if p.id in sel])
         self.table.blockSignals(False)
         self.table.setVisible(bool(rows))
         self.empty.setVisible(not rows)
@@ -197,6 +197,7 @@ class ProxiesPage(QWidget):
         for ico, text, fn in (("shield", "Проверить", self.check_selected), ("copy", "Копировать адрес", self.copy_selected),
                               (None, None, None), ("refresh", "Сменить IP сейчас", self.change_ip_selected),
                               ("edit", "Ссылка смены IP…", self.set_change_url),
+                              ("tag", "Провайдер…", self.set_provider),
                               (None, None, None), ("trash", "Удалить\tDel", self.delete_selected)):
             if ico is None:
                 m.addSeparator()
@@ -343,6 +344,38 @@ class ProxiesPage(QWidget):
                 p.change_ip_url = url.text().strip()
                 db.save_proxy(p)
         self.win.log(f"Ссылка смены IP сохранена для прокси: {len(ids)}")
+        self.refresh()
+
+    def set_provider(self):
+        from PySide6.QtWidgets import QComboBox
+        from ...banstats import provider
+        ids = self.selected_ids()
+        if not ids:
+            return
+        first = db.get_proxy(ids[0])
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        name = QComboBox()
+        name.setEditable(True)
+        name.addItem(first.provider if first else "")
+        name.addItems(sorted({p.provider for p in db.list_proxies() if p.provider} - {first.provider if first else ""}))
+        name.lineEdit().setPlaceholderText(f"Например: Smartproxy, IPRoyal — пусто: «{provider(first) if first else ''}» по хосту")
+        hint = QLabel(f"Прокси: {len(ids)}. Название провайдера нужно для статистики банов (Профили → Действия → "
+                      "«Статистика банов»): какой провайдер работает хуже. Если не задано — группировка по домену хоста.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        lay.addWidget(name)
+        lay.addWidget(hint)
+        if not Modal(self.win, "Провайдер прокси", w, ok_text="Сохранить", width=560).exec():
+            return
+        for pid in ids:
+            p = db.get_proxy(pid)
+            if p:
+                p.provider = name.currentText().strip()
+                db.save_proxy(p)
+        self.win.log(f"Провайдер «{name.currentText().strip() or 'по хосту'}» — прокси: {len(ids)}")
         self.refresh()
 
     def change_ip_selected(self):

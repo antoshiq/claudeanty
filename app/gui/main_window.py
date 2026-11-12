@@ -2,7 +2,7 @@ import time
 
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QSplitter,
+from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QSplitter,
                                QStackedWidget, QTabWidget, QToolButton, QVBoxLayout, QWidget)
 
 from .. import db, settings
@@ -21,7 +21,7 @@ from .tabstrip import TabStrip
 from .widgets import retint, tool
 from .workers import run_bg
 
-VERSION = "1.5"
+from .. import __version__ as VERSION
 GAP = 6  # промежуток между карточками
 
 
@@ -102,6 +102,31 @@ class MainWindow(QMainWindow):
         self.update_timer.timeout.connect(self.check_updates)
         self.update_timer.start(6 * 3600 * 1000)
         QTimer.singleShot(2000, self.check_updates)
+        self.self_update_timer = QTimer(self)
+        self.self_update_timer.timeout.connect(self.check_self_update)
+        self.self_update_timer.start(3600 * 1000)  # раз в час смотрит, прошли ли сутки с прошлой проверки
+        QTimer.singleShot(8000, self.check_self_update)
+
+    def check_self_update(self):
+        from .. import selfupdate
+        self._show_update_notice(selfupdate.pending_notice())
+        if not selfupdate.should_check():
+            return
+
+        def done(res, err):
+            if err or not res:
+                return
+            selfupdate.remember(res)
+            if res["available"] and not selfupdate.skipped(res["latest"]):
+                self.log(f"{res['message']} Настройки → О программе → «Обновить».")
+                self._show_update_notice(selfupdate.pending_notice())
+
+        run_bg(selfupdate.check, done, self)
+
+    def _show_update_notice(self, text):
+        self.st_update.setVisible(bool(text))
+        if text:
+            self.st_update.setText(f"⬆ {text}")
 
     def _pull_events(self):
         new = [(n, t) for n, t in list(manager.scheduler.events) if n > self._event_seq]
@@ -269,6 +294,14 @@ class MainWindow(QMainWindow):
         self.st_engine = QLabel()
         sb.addPermanentWidget(self.st_engine)
         sb.addPermanentWidget(self.st_count)
+        self.st_update = QPushButton()
+        self.st_update.setObjectName("statusLink")
+        self.st_update.setFlat(True)
+        self.st_update.setCursor(Qt.PointingHandCursor)
+        self.st_update.setToolTip("Открыть Настройки → О программе")
+        self.st_update.clicked.connect(lambda: (self.open_view("settings"), self.pages["settings"].scroll_to("about")))
+        self.st_update.setVisible(False)
+        sb.addPermanentWidget(self.st_update)
         sb.addPermanentWidget(QLabel(f"claudeAnty {VERSION}"))
 
     def _build_shortcuts(self):
@@ -445,9 +478,15 @@ class MainWindow(QMainWindow):
                 self._remove_browser_tab(pid)
 
     # ================= общее =================
-    def log(self, text: str):
+    def log(self, text: str, error: bool = False):
         self.output.appendPlainText(f"[{time.strftime('%H:%M:%S')}] {text}")
         self.msg.setText(text)
+        if error or text.lower().startswith(("ошибка", "не удалось")):
+            # ошибку не прячем за вкладкой «Отпечаток»: показываем вывод и подсвечиваем строку состояния
+            self.panel_card.setVisible(True)
+            self.panel.setCurrentWidget(self.output)
+            self.msg.setStyleSheet(f"color: {C['red']};")
+            QTimer.singleShot(8000, lambda: self.msg.setStyleSheet(""))
 
     def set_details(self, text: str):
         self.details.setPlainText(text)
@@ -493,8 +532,10 @@ class MainWindow(QMainWindow):
             self.log("Локальный API выключен. Включите его в Настройках и перезапустите приложение.")
             return
         base = f"http://{API_HOST}:{API_PORT}"
+        auth = ("  Ключ задан (Настройки → Локальный API): добавляйте заголовок X-API-Key или ?token=\n"
+                if settings.get("api_token") else "  Без ключа — задать можно в Настройках → Локальный API\n")
         self.output.appendPlainText(
-            f"\nЛокальный API: {base}\n"
+            f"\nЛокальный API: {base}\n" + auth +
             f"  GET  /profiles                 список профилей\n"
             f"  GET  /profiles/{{id}}/start      запуск → ws_endpoint (Playwright / Puppeteer)\n"
             f"  GET  /profiles/{{id}}/stop       остановка\n"

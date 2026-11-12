@@ -10,8 +10,15 @@ Cookies и сохранённые пароли Chrome зашифрованы к�
 Если папка пришла с другого ПК, ключ Chrome из «Local State» сбрасывается — Chrome создаст новый.
 
 Пароли и 2FA из claudeAnty в базе зашифрованы DPAPI (тоже привязка к ПК), поэтому в архив они попадают
-только по явной галочке и в открытом виде — такой файл нужно хранить как пароль.
+только по явной галочке.
+
+Шифрование файла целиком (crypto.encrypt_file, AES-256-GCM):
+  • паролем — для передачи профиля другому человеку или на другой ПК: без пароля не прочитать ни cookies,
+    ни пароли, ни историю;
+  • ключом Windows (DPAPI) — резервные копии по умолчанию: открываются только на этом ПК под этой учётной записью.
+Без шифрования cookies и (по галочке) пароли лежат в архиве открытым текстом.
 """
+import contextlib
 import json
 import os
 import shutil
@@ -61,9 +68,10 @@ def _proxy_key(p: Proxy) -> tuple:
 # ---------------- экспорт ----------------
 async def export_profiles(manager, pids: list[int], path: str, include_secrets: bool = False,
                           progress: Optional[Callable[[str], None]] = None, cookies: bool = True,
-                          all_proxies: bool = False) -> dict:
+                          all_proxies: bool = False, password: str = "", dpapi: bool = False) -> dict:
     """Пишет архив. Работающие профили не останавливаются: cookies берутся из живого браузера,
-    файлы, занятые браузером, пропускаются (их число — в результате)."""
+    файлы, занятые браузером, пропускаются (их число — в результате).
+    password — зашифровать файл паролем; dpapi — ключом Windows этого ПК (резервные копии)."""
     say = progress or (lambda s: None)
     manifest = {"format": FORMAT, "app": "claudeAnty", "created": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "profiles": [], "proxies": []}
@@ -96,13 +104,50 @@ async def export_profiles(manager, pids: list[int], path: str, include_secrets: 
         if all_proxies:
             manifest["proxies"] = [x.model_dump() for x in db.list_proxies()]
         z.writestr(MANIFEST, json.dumps(manifest, ensure_ascii=False, indent=1))
+    if password or dpapi:
+        say("Шифрование файла…")
+        enc = Path(path + ".enc.part")
+        try:
+            crypto.encrypt_file(tmp, enc, password, crypto.MODE_PASSWORD if password else crypto.MODE_DPAPI)
+        finally:
+            tmp.unlink(missing_ok=True)
+        tmp = enc
     os.replace(tmp, path)
     size = Path(path).stat().st_size
-    return {"path": path, "profiles": len(manifest["profiles"]), "skipped_files": skipped, "size": size}
+    return {"path": path, "profiles": len(manifest["profiles"]), "skipped_files": skipped, "size": size,
+            "encrypted": "password" if password else "dpapi" if dpapi else ""}
 
 
 # ---------------- импорт ----------------
-def read_manifest(path: str) -> dict:
+def encryption(path: str) -> str:
+    """"" — обычный архив, "password" — нужен пароль, "dpapi" — ключ Windows."""
+    mode = crypto.is_encrypted_file(path)
+    return {0: "", crypto.MODE_PASSWORD: "password", crypto.MODE_DPAPI: "dpapi"}.get(mode, "unknown")
+
+
+@contextlib.contextmanager
+def opened(path: str, password: str = ""):
+    """Путь к обычному zip: сам файл или расшифрованная временная копия (удаляется по выходе).
+    Неверный/пустой пароль -> crypto.PasswordError."""
+    if not crypto.is_encrypted_file(path):
+        yield path
+        return
+    tmp_dir = DATA_DIR / "tmp"
+    tmp_dir.mkdir(exist_ok=True)
+    tmp = tmp_dir / f"import-{os.getpid()}-{time.time_ns()}.zip"
+    try:
+        crypto.decrypt_file(path, tmp, password)
+        yield str(tmp)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def read_manifest(path: str, password: str = "") -> dict:
+    with opened(path, password) as plain:
+        return _read_manifest(plain)
+
+
+def _read_manifest(path: str) -> dict:
     with zipfile.ZipFile(path) as z:
         m = json.loads(z.read(MANIFEST).decode("utf-8"))
     if m.get("app") != "claudeAnty":
@@ -133,9 +178,15 @@ def _fix_foreign_chrome_dir(udd: Path):
     return True
 
 
-async def import_archive(manager, path: str, progress: Optional[Callable[[str], None]] = None) -> dict:
+async def import_archive(manager, path: str, progress: Optional[Callable[[str], None]] = None,
+                         password: str = "") -> dict:
+    with opened(path, password) as plain:
+        return await _import_archive(manager, plain, progress)
+
+
+async def _import_archive(manager, path: str, progress: Optional[Callable[[str], None]] = None) -> dict:
     say = progress or (lambda s: None)
-    m = read_manifest(path)
+    m = _read_manifest(path)
     proxies = {_proxy_key(x): x for x in db.list_proxies()}
 
     def proxy_id(data: Optional[dict]) -> Optional[int]:
@@ -189,14 +240,26 @@ async def import_archive(manager, path: str, progress: Optional[Callable[[str], 
 
 
 # ---------------- резервные копии ----------------
+def backup_encryption() -> tuple[str, bool]:
+    """-> (пароль, dpapi) для резервных копий по настройкам."""
+    mode = settings.get("backup_encryption")
+    if mode == "password":
+        pw = settings.get("backup_password")
+        if pw:
+            return pw, False
+        return "", True  # пароль не задан — хотя бы ключом Windows, но не открытым текстом
+    return "", mode == "dpapi"
+
+
 async def backup_all(manager, progress: Optional[Callable[[str], None]] = None) -> dict:
     """Все профили и все прокси в data/backups/backup-ГГГГ-ММ-ДД_ЧЧ-ММ.caprofile; старые копии сверх
-    лимита удаляются. Пароли и 2FA — по настройке «backup_secrets» (в открытом виде!)."""
+    лимита удаляются. Пароли и 2FA — по настройке «backup_secrets»; шифрование — «backup_encryption»."""
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     path = BACKUP_DIR / f"backup-{time.strftime('%Y-%m-%d_%H-%M')}{EXT}"
     pids = [p.id for p in db.list_profiles()]
+    pw, dp = backup_encryption()
     res = await export_profiles(manager, pids, str(path), include_secrets=bool(settings.get("backup_secrets")),
-                                progress=progress, all_proxies=True)
+                                progress=progress, all_proxies=True, password=pw, dpapi=dp)
     keep = max(1, int(settings.get("backup_keep")))
     old = sorted(BACKUP_DIR.glob(f"backup-*{EXT}"))[:-keep]
     for f in old:

@@ -21,6 +21,8 @@ class Proxy(BaseModel):
     tcp_os: str = ""  # ОС выходного узла по TCP/IP-отпечатку (p0f, browserleaks): Windows, Linux, Android…
     mtu: int = 0  # MTU соединения: 1500 — обычный Ethernet, меньше — туннель (VPN/прокси)
     change_ip_url: str = ""  # ссылка смены IP мобильного прокси (открывается перед запуском профиля)
+    checked_at: float = 0  # когда прокси последний раз проверялся перед запуском (epoch)
+    provider: str = ""  # провайдер (для статистики банов); пусто — по домену хоста
 
     @classmethod
     def parse(cls, line: str) -> "Proxy":
@@ -44,7 +46,16 @@ class Proxy(BaseModel):
             else:
                 hostport = line
         host, _, port = hostport.rpartition(":")
-        return cls(type=ptype, host=host, port=int(port), username=user, password=pwd, change_ip_url=change)
+        if not host or not port.isdigit() or not 0 < int(port) < 65536:
+            raise ValueError(f"не похоже на прокси: «{line[:60]}» — нужно host:port, host:port:user:pass "
+                             "или type://user:pass@host:port")
+        ptype = ptype.lower()
+        if ptype in ("socks", "socks5h"):
+            ptype = "socks5"
+        if ptype not in ("http", "https", "socks5"):
+            raise ValueError(f"тип прокси «{ptype}» не поддерживается — http, https или socks5")
+        return cls(type=ptype, host=host, port=int(port), username=user, password=pwd,
+                   change_ip_url=change)
 
     def url(self) -> str:
         auth = f"{self.username}:{self.password}@" if self.username else ""
@@ -77,6 +88,10 @@ class Profile(BaseModel):
     last_check: dict = Field(default_factory=dict)  # результат последней проверки отпечатка
     fp_history: list = Field(default_factory=list)  # хэши отпечатка по проверкам (стабильность между запусками)
     last_external: dict = Field(default_factory=dict)  # последний отчёт внешних детекторов (pixelscan, CreepJS…)
+    ban_reason: str = ""  # почему поставлена метка «Бан» автоматически (banwatch.py)
+    captcha_streak: dict = Field(default_factory=dict)  # сайт -> сколько запусков подряд была капча
+    warm_plan: dict = Field(default_factory=dict)  # план прогрева: {"plan", "started", "done": [даты]} (warmplan.py)
+    created: float = 0  # когда создан (epoch); 0 — создан до появления поля
 
 
 class Account(BaseModel):
@@ -88,6 +103,7 @@ class Account(BaseModel):
     login: str = ""
     password: str = ""
     totp: str = ""  # секрет 2FA: base32 («JBSW Y3DP…») или ссылка otpauth://totp/…
+    imap: str = ""  # сервер почты для шага «Ждать письмо»: imap.example.com[:993]; пусто — по домену логина
     notes: str = ""  # резервные коды и т.п.
 
 

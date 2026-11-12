@@ -6,7 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QCompleter, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QPlainTextEdit, QPushButton, QTabWidget, QVBoxLayout, QWidget)
 
-from .. import db, settings
+from .. import db, hostos, settings
 from ..fingerprints.generator import (CORES, DEVICES, MEMORY, SCREENS, apply_edit, generate, gpus_for, validate)
 from ..models import STATUSES, Profile
 from .icons import icon
@@ -35,6 +35,38 @@ def _hint(text: str = "") -> QLabel:
     h.setObjectName("hint")
     h.setWordWrap(True)
     return h
+
+
+def _with_note(field: QWidget, note: QLabel) -> QWidget:
+    w = QWidget()
+    v = QVBoxLayout(w)
+    v.setContentsMargins(0, 0, 0, 0)
+    v.setSpacing(6)
+    v.addWidget(field)
+    v.addWidget(note)
+    from PySide6.QtWidgets import QSizePolicy
+    w.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+    return w
+
+
+class _WrapLabel(QLabel):
+    """Текст с переносами, высота которого считается по настоящей ширине (у QLabel — по условной)."""
+
+    def __init__(self, text: str = ""):
+        super().__init__(text)
+        self.setWordWrap(True)
+        self.setObjectName("hint")
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        h = self.heightForWidth(self.width())
+        if h > 0 and h != self.minimumHeight():
+            self.setFixedHeight(h)
+
+    def setText(self, text: str):
+        super().setText(text)
+        if self.width() > 50:
+            self.setFixedHeight(max(1, self.heightForWidth(self.width())))
 
 
 def _timezones() -> list[str]:
@@ -83,7 +115,7 @@ class ProfileForm(QWidget):
         self.engine.addItem("Camoufox (Firefox)", "camoufox")
         self.os = QComboBox()
         for label, v in (("Windows", "windows"), ("macOS", "macos"), ("Linux", "linux")):
-            self.os.addItem(label, v)
+            self.os.addItem(label + ("  — как у этого ПК" if v == hostos.host_os() else ""), v)
         self.device = QComboBox()
         self.device.addItem("Случайное устройство", "")
         for k, v in DEVICES.items():
@@ -109,12 +141,15 @@ class ProfileForm(QWidget):
         f.addRow(_label("Название"), self.name)
         f.addRow(_label("Тип"), self.kind)
         f.addRow(_label("Движок"), self.engine)
-        f.addRow(_label("ОС"), self.os)
+        # предупреждение — в одном контейнере с полем: отдельной строкой QFormLayout неверно считает высоту
+        # текста с переносами и оставляет пустые поля сверху и снизу
+        self.os_warn = _WrapLabel()
+        self.os_warn.setObjectName("modalError")
+        f.addRow(_label("ОС"), _with_note(self.os, self.os_warn))
         f.addRow(_label("Устройство"), self.device)
-        f.addRow(_label("Прокси"), self.proxy)
-        self.proxy_warn = _hint()
+        self.proxy_warn = _WrapLabel()
         self.proxy_warn.setObjectName("modalError")
-        f.addRow("", self.proxy_warn)
+        f.addRow(_label("Прокси"), _with_note(self.proxy, self.proxy_warn))
         self.proxy.currentIndexChanged.connect(lambda _: self._proxy_check())
         f.addRow(_label("Метка"), self.status)
         f.addRow(_label("Папка"), self.folder)
@@ -278,6 +313,9 @@ class ProfileForm(QWidget):
         if mobile and self.engine.currentData() != "chromium":
             self.engine.setCurrentIndex(0)
         self.mobile_info.setVisible(mobile)
+        os_warn = hostos.warning(self.kind.currentData(), self.os.currentData())
+        self.os_warn.setText(os_warn)
+        self.os_warn.setVisible(bool(os_warn))
         self._proxy_check()
         # тип/ОС/устройство поменялись — нужен новый отпечаток
         same = self.profile and self._identity() == getattr(self, "_orig_identity", None)
@@ -389,7 +427,11 @@ class ProfileForm(QWidget):
     def result_profile(self) -> Profile:
         p = self.profile.model_copy(deep=True) if self.profile else Profile(name="")
         kind, engine, os_name, device = self._identity()
-        p.name = self.name.text().strip() or "Profile"
+        if self.name.text().strip():
+            p.name = self.name.text().strip()
+        elif not p.name:  # без названия — «Profile N» со следующим свободным номером, а не десять одинаковых «Profile»
+            from .pages.profiles import next_number
+            p.name = f"Profile {next_number('Profile')}"
         p.kind, p.engine, p.os, p.device = kind, engine, os_name, device
         p.proxy_id = self.proxy.currentData()
         p.status = self.status.currentData() or ""

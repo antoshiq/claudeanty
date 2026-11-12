@@ -17,6 +17,41 @@ from ..proxy.checker import check_proxy
 
 app = FastAPI(title="claudeAnty local API")
 
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
+
+
+def _local_origin(origin: str) -> bool:
+    from urllib.parse import urlparse
+    try:
+        return (urlparse(origin).hostname or "") in {"127.0.0.1", "localhost", "::1"}
+    except ValueError:
+        return False
+
+
+@app.middleware("http")
+async def _guard(request, call_next):
+    """API — для ваших скриптов, не для сайтов. Без этой защиты любая открытая в браузере страница могла бы
+    запускать профили запросами на 127.0.0.1 (CSRF), а через DNS rebinding — читать пароли и коды 2FA."""
+    from fastapi.responses import JSONResponse
+
+    from .. import settings
+    host = request.headers.get("host", "").rsplit(":", 1)[0].lower()
+    if host not in _LOCAL_HOSTS:
+        return JSONResponse({"detail": "запрос не к 127.0.0.1 (Host) — отклонён"}, 403)
+    origin = request.headers.get("origin")
+    if request.headers.get("sec-fetch-site") in ("cross-site", "same-site") or (origin and not _local_origin(origin)):
+        return JSONResponse({"detail": "запросы со страниц сайтов к API запрещены"}, 403)
+    token = settings.get("api_token")
+    if token and request.headers.get("x-api-key") != token and request.query_params.get("token") != token:
+        return JSONResponse({"detail": "нужен ключ API: заголовок X-API-Key или ?token="}, 401)
+    return await call_next(request)
+
+
+@app.exception_handler(ValueError)
+async def _value_error(request, exc):
+    from fastapi.responses import JSONResponse
+    return JSONResponse({"detail": str(exc)[:300] or "неверные данные"}, 400)
+
 
 def _profile_or_404(pid: int) -> Profile:
     p = db.get_profile(pid)
@@ -37,6 +72,58 @@ def engine_status(force: bool = False):
     """Движок (chrome | chromium), его версия, последняя стабильная Chrome и предупреждение, если отстаёт."""
     from ..updates import status
     return status(force)
+
+
+class AutocheckIn(BaseModel):
+    profiles: list[int] = []  # пусто — образцы из Настроек / автоматически
+
+
+@app.post("/engine/autocheck")
+def engine_autocheck(body: Optional[AutocheckIn] = None):
+    """Проверка профилей-образцов и уникальности — то же, что происходит само после обновления Chrome."""
+    from .. import enginewatch
+    pids = [_profile_or_404(i).id for i in (body.profiles if body else [])] or None
+    return manager.run(enginewatch.run(manager, progress=manager.scheduler.say, pids=pids), timeout=1800)
+
+
+@app.get("/engine/autocheck")
+def engine_autocheck_last():
+    from .. import enginewatch, settings
+    return {"samples": enginewatch.sample_profiles(), "seen_version": settings.get("engine_seen_version"),
+            "last": settings.get("engine_watch_last")}
+
+
+class ArrangeIn(BaseModel):
+    profiles: list[int] = []  # пусто — все запущенные
+    mode: str = "grid"  # grid | cascade
+    monitor: int = 0
+    cols: int = 0  # 0 — авто
+    gap: int = 0
+
+
+@app.post("/windows/arrange")
+def arrange_windows(body: ArrangeIn):
+    """Разложить окна запущенных профилей сеткой или каскадом (только Windows)."""
+    from .. import winlayout
+    pids = body.profiles or [p.id for p in db.list_profiles() if manager.is_running(p.id)]
+    try:
+        return winlayout.arrange([p for p in pids if manager.is_running(p)], body.mode, body.monitor, body.cols,
+                                 body.gap)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/windows/monitors")
+def list_monitors():
+    from .. import winlayout
+    return winlayout.monitors()
+
+
+@app.get("/bans/stats")
+def ban_stats(by: str = "provider", days: int = 0):
+    """Статистика банов: by = provider | folder | plan | ip_type | country | os | tag; days=0 — за всё время."""
+    from .. import banstats
+    return banstats.stats(by, days)
 
 
 # ---------- профили ----------
@@ -70,6 +157,10 @@ class BulkRequest(BaseModel):
 
 @app.post("/profiles/bulk")
 def create_bulk(req: BulkRequest):
+    if not 1 <= req.count <= 500:
+        raise HTTPException(400, "count — от 1 до 500")
+    for line in req.proxies:  # сначала разобрать все прокси: ошибка в 7-й строке не должна оставить 6 профилей
+        Proxy.parse(line)
     out = []
     for i in range(req.count):
         p = req.template.model_copy(deep=True)
@@ -80,6 +171,38 @@ def create_bulk(req: BulkRequest):
             p.proxy_id = db.save_proxy(Proxy.parse(req.proxies[i])).id
         out.append(_view(manager.create_profile(p)))
     return out
+
+
+class AccountsImportIn(BaseModel):
+    lines: str  # строки аккаунтов, по одной на профиль
+    format: str = "login:pass:2fa:proxy"  # поля: login, pass, 2fa, proxy, email, email_pass, name, notes, -
+    service: str = ""  # Google, Facebook… — сервис аккаунтов
+    url: str = ""
+    template: Optional[Profile] = None  # настройки новых профилей; по умолчанию — из Настроек
+    name_mode: str = "login"  # login | number
+    folder: str = ""
+    tags: list[str] = []
+    free_proxies: bool = False  # строкам без прокси — свободные прокси из списка
+
+
+@app.post("/profiles/import-accounts")
+def import_accounts(body: AccountsImportIn):
+    """Купленные аккаунты строками login:pass:2fa:proxy -> по профилю на строку. Любая ошибка в строках —
+    400 и ни одного профиля (сначала разбираются все строки)."""
+    from .. import accimport, settings
+    rows, errors = accimport.parse_lines(body.lines, body.format)
+    if errors:
+        raise HTTPException(400, {"errors": [{"line": n, "error": e} for n, e in errors]})
+    if not rows:
+        raise HTTPException(400, "нет строк с аккаунтами")
+    free = None
+    if body.free_proxies:
+        used = {p.proxy_id for p in db.list_profiles() if p.proxy_id}
+        free = [px for px in db.list_proxies() if px.id not in used and px.status != "fail"]
+    defaults = {k: settings.get(f"default_{k}") for k in ("kind", "engine", "os", "device", "auto_geo")}
+    return accimport.create_profiles(manager, rows, service=body.service, url=body.url, template=body.template,
+                                     name_mode=body.name_mode, folder=body.folder, tags=body.tags,
+                                     free_proxies=free, defaults=defaults)
 
 
 @app.patch("/profiles/{pid}")
@@ -95,7 +218,15 @@ def patch_profile(pid: int, changes: dict):
     if {"kind", "os", "engine", "device"} & changes.keys():
         data.fingerprint = {}
         manager._prepare_fingerprint(data)
-    return _view(db.save_profile(data))
+    saved = db.save_profile(data)
+    if "status" in changes and changes["status"] != p.status:
+        from .. import activity, banstats
+        from ..models import STATUSES
+        if "ban" in (p.status, saved.status):
+            activity.log(pid, "ban", f"метка «{STATUSES.get(p.status, ('—',))[0]}» → "
+                                     f"«{STATUSES.get(saved.status, ('—',))[0]}» через API")
+        banstats.status_changed(saved, p.status, saved.status, "api")
+    return _view(saved)
 
 
 @app.delete("/profiles/{pid}")
@@ -137,6 +268,71 @@ def external_check(pid: int, sites: str = ""):
     from ..external_check import run_external
     _profile_or_404(pid)
     return manager.run(run_external(manager, pid, [s for s in sites.split(",") if s] or None), timeout=600)
+
+
+@app.get("/profiles/{pid}/health")
+def profile_health(pid: int, days: int = 30, kind: str = ""):
+    """История проверок: по дням (✓ / ! / ✗) и последние записи с пометкой, что стало хуже. kind: check | external."""
+    from .. import health
+    p = _profile_or_404(pid)
+    k = kind or None
+    return {"status": p.status, "ban_reason": p.ban_reason, "captcha_streak": p.captcha_streak,
+            "daily": [{**d, "date": d["date"].isoformat()} for d in health.daily([pid], k, days)],
+            "recent": health.recent([pid], k, limit=30)}
+
+
+@app.get("/profiles/{pid}/activity")
+def profile_activity(pid: int, days: int = 30, kind: str = "", limit: int = 200):
+    """Журнал активности: запуски, остановки (сколько работал, сайты), сценарии, прогрев, прокси, метки."""
+    import time
+    _profile_or_404(pid)
+    return db.list_activity(pid, since=time.time() - days * 86400, kind=kind or None, limit=limit)
+
+
+class PlanIn(BaseModel):
+    plan: str = ""  # generic | google | facebook | instagram | tiktok; пусто — снять
+
+
+@app.get("/warm-plans")
+def warm_plans():
+    from ..warmplan import PLANS
+    return {k: {"title": v["title"], "days": v["days"]} for k, v in PLANS.items()}
+
+
+@app.post("/profiles/{pid}/warm-plan")
+def set_warm_plan(pid: int, body: PlanIn):
+    from .. import warmplan
+    _profile_or_404(pid)
+    try:
+        warmplan.assign(pid, body.plan)
+    except KeyError as e:
+        raise HTTPException(400, str(e))
+    return {"progress": warmplan.progress(db.get_profile(pid))}
+
+
+@app.post("/profiles/{pid}/warm-plan/run")
+def run_warm_plan_day(pid: int, force: bool = False):
+    """Выполнить следующий день плана прогрева (без окна)."""
+    from ..warmplan import run_day
+    _profile_or_404(pid)
+    return manager.run(run_day(manager, pid, force=force), timeout=3600)
+
+
+@app.get("/uniqueness")
+def uniqueness_report(ids: str = ""):
+    """Совпадения canvas / WebGL / audio / navigator и общие IP между профилями (ids через запятую, пусто — все)."""
+    from .. import uniqueness
+    pids = [int(x) for x in ids.split(",") if x.strip()] or None
+    r = uniqueness.analyze(pids)
+    return {**r, "text": uniqueness.format_report(r)}
+
+
+@app.post("/uniqueness/collect")
+def uniqueness_collect(ids: str = ""):
+    """Снять хэши отпечатка заново (каждый профиль запускается без окна на несколько секунд)."""
+    from .. import uniqueness
+    pids = [int(x) for x in ids.split(",") if x.strip()] or [p.id for p in db.list_profiles()]
+    return {"collected": manager.run(uniqueness.collect(manager, pids), timeout=None)}
 
 
 @app.post("/profiles/{pid}/stability")
@@ -222,7 +418,10 @@ def list_accounts(pid: int):
 
 @app.post("/profiles/{pid}/accounts")
 def add_account(pid: int, acc: Account):
+    from .. import totp
     _profile_or_404(pid)
+    if acc.totp and not totp.valid(acc.totp):
+        raise HTTPException(400, "секрет 2FA не разобран: нужен base32 (A–Z, 2–7) или ссылка otpauth://totp/…")
     acc.id, acc.profile_id = None, pid
     return db.save_account(acc).model_dump()
 
@@ -296,7 +495,8 @@ def run_task(tid: int):
 class ExportIn(BaseModel):
     profiles: list[int]
     path: str  # куда сохранить .caprofile
-    secrets: bool = False  # включить пароли и 2FA (в открытом виде)
+    secrets: bool = False  # включить пароли и 2FA
+    password: str = ""  # зашифровать файл паролем (AES-256-GCM, ключ из пароля через scrypt)
 
 
 @app.post("/profiles/export")
@@ -304,18 +504,20 @@ def export_profiles(body: ExportIn):
     from ..backup import export_profiles as do_export
     for pid in body.profiles:
         _profile_or_404(pid)
-    return manager.run(do_export(manager, body.profiles, body.path, include_secrets=body.secrets), timeout=3600)
+    return manager.run(do_export(manager, body.profiles, body.path, include_secrets=body.secrets,
+                                 password=body.password), timeout=3600)
 
 
 class ImportIn(BaseModel):
     path: str
+    password: str = ""  # для файлов, зашифрованных паролем
 
 
 @app.post("/profiles/import")
 def import_profiles(body: ImportIn):
     from ..backup import import_archive
     try:
-        return manager.run(import_archive(manager, body.path), timeout=3600)
+        return manager.run(import_archive(manager, body.path, password=body.password), timeout=3600)
     except (ValueError, KeyError, FileNotFoundError) as e:
         raise HTTPException(400, str(e))
 

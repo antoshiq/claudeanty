@@ -56,7 +56,11 @@ THEMES = {
 }
 
 C: dict = {}
-_ASSETS = Path(__file__).parent / "assets"
+from ..paths import DATA_DIR as _DATA_DIR, FROZEN as _FROZEN
+
+# стрелки и галочки для QSS генерируются под тему; в собранной версии — в папку данных (папка программы
+# может быть недоступна для записи)
+_ASSETS = (_DATA_DIR / "ui-assets") if _FROZEN else Path(__file__).parent / "assets"
 
 
 def is_light() -> bool:
@@ -229,6 +233,8 @@ QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::su
 QStatusBar {{ background: {c['base']}; border: none; min-height: 24px; }}
 QStatusBar::item {{ border: none; }}
 QStatusBar QLabel {{ color: {c['muted']}; font-size: 12px; padding: 0 8px; }}
+QPushButton#statusLink {{ background: transparent; border: none; color: {c['accent']}; font-size: 12px; padding: 0 8px; min-height: 0; }}
+QPushButton#statusLink:hover {{ text-decoration: underline; }}
 QLabel#remote {{ background: {c['accent']}; color: #ffffff; padding: 0 10px; border-radius: 4px; margin: 2px 0 2px 6px; }}
 
 /* ---------- меню и подсказки ---------- */

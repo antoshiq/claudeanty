@@ -12,6 +12,9 @@ _DIR = Path(__file__).parent / "data"
 DEVICES: dict = json.loads((_DIR / "devices.json").read_text(encoding="utf-8"))
 DESKTOP: dict = json.loads((_DIR / "desktop.json").read_text(encoding="utf-8"))
 FONTS: dict = json.loads((_DIR / "fonts.json").read_text(encoding="utf-8"))
+# реальные сочетания железа (видеокарта + ядра + память + экраны) с весами распространённости
+MACHINES: dict = {k: v for k, v in json.loads((_DIR / "machines.json").read_text(encoding="utf-8")).items()
+                  if not k.startswith("_")}
 
 CORES = [2, 4, 6, 8, 10, 12, 16, 20, 24]
 MEMORY = [2, 4, 8, 16, 32]
@@ -46,7 +49,8 @@ def gl_family(renderer: str) -> str:
     return "gl"
 
 
-def gpus_for(os_name: str) -> list[tuple[str, str]]:
+def gpus_for(os_name: str, legacy: bool = False) -> list[tuple[str, str]]:
+    """Видеокарты для выбора в форме. legacy=True — плюс старые названия (для проверки уже созданных профилей)."""
     if os_name == "android":
         seen, out = set(), []
         for d in DEVICES.values():
@@ -55,7 +59,17 @@ def gpus_for(os_name: str) -> list[tuple[str, str]]:
                 seen.add(k)
                 out.append(k)
         return out
-    return [tuple(g) for g in DESKTOP[os_name]["gpus"]]
+    out = []
+    for g in [tuple(m["gpu"]) for m in MACHINES.get(os_name, [])] + \
+            ([tuple(g) for g in DESKTOP[os_name]["gpus"]] if legacy else []):
+        if g not in out:
+            out.append(g)
+    return out
+
+
+def pick_machine(os_name: str) -> dict:
+    ms = MACHINES[os_name]
+    return random.choices(ms, weights=[m.get("weight", 1) for m in ms])[0]
 
 
 def _viewport_for(w: int, h: int) -> dict:
@@ -64,8 +78,9 @@ def _viewport_for(w: int, h: int) -> dict:
 
 def generate_desktop(os_name: str = "windows") -> dict:
     d = DESKTOP[os_name]
-    w, h = random.choice(DESKTOP["screens"])
-    vendor, renderer = random.choice(d["gpus"])
+    m = pick_machine(os_name)
+    w, h = random.choice(m["screens"])
+    vendor, renderer = m["gpu"]
     return {
         "kind": "desktop", "os": os_name, "seed": random.randint(1, 2**31 - 1),
         # версия Chrome будет заменена реальной при запуске
@@ -77,20 +92,9 @@ def generate_desktop(os_name: str = "windows") -> dict:
         "screen": {"width": w, "height": h, "avail_height": h - 40, "dpr": 1.0, "color_depth": 24},
         "viewport": _viewport_for(w, h),
         "webgl": {"vendor": vendor, "renderer": renderer},
-        **_cpu_ram(os_name, renderer),
+        "cores": random.choice(m["cores"]), "memory": random.choice(m["memory"]), "machine": m["label"],
         "touch_points": 0, "mobile": False,
     }
-
-
-def _cpu_ram(os_name: str, renderer: str) -> dict:
-    """Ядра и память, которые встречаются вместе на реальных машинах."""
-    if os_name == "macos" and "Apple" in renderer:
-        cores = random.choice([8, 8, 10, 12])
-        memory = random.choice([8, 16, 16, 32])
-    else:
-        cores = random.choice(DESKTOP["cores"])
-        memory = random.choice([m for m in DESKTOP["memory"] if m >= (8 if cores >= 12 else 4)])
-    return {"cores": cores, "memory": memory}
 
 
 def generate_mobile(device_key: str | None = None) -> dict:
@@ -150,6 +154,8 @@ def apply_edit(fp: dict, screen=None, cores=None, memory=None, gpu=None) -> dict
     if memory:
         fp["memory"] = int(memory)
     if gpu:
+        if tuple(gpu) != (fp.get("webgl", {}).get("vendor"), fp.get("webgl", {}).get("renderer")):
+            fp.pop("machine", None)  # видеокарту сменили вручную — это уже не пресет
         fp["webgl"] = {"vendor": gpu[0], "renderer": gpu[1]}
     return fp
 
@@ -157,7 +163,7 @@ def apply_edit(fp: dict, screen=None, cores=None, memory=None, gpu=None) -> dict
 def validate(kind: str, os_name: str, fp: dict, locale: str = "", timezone: str = "", auto_geo: bool = True) -> list[str]:
     """Список проблем согласованности. Пустой список — всё в порядке."""
     errs = []
-    gpus = gpus_for("android" if kind == "mobile" else os_name)
+    gpus = gpus_for("android" if kind == "mobile" else os_name, legacy=True)
     gpu = (fp.get("webgl", {}).get("vendor"), fp.get("webgl", {}).get("renderer"))
     if gpu not in gpus:
         errs.append("Видеокарта не подходит к выбранной ОС/устройству")

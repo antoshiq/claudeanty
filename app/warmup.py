@@ -57,4 +57,6 @@ async def warmup(manager, pid: int, progress=None) -> dict:
         if p and p.status in ("", "new", "warming"):
             p.status = "ready"
             db.save_profile(p)
+        from . import activity
+        activity.log(pid, "warmup", f"прогрев: сайтов {visited} из {count}, cookies {cookies}")
         return {"visited": visited, "cookies": cookies}

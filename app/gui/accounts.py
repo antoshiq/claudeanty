@@ -43,6 +43,8 @@ class AccountForm(QWidget):
             QLineEdit.Normal if self.password.echoMode() == QLineEdit.Password else QLineEdit.Password))
         self.secret = QLineEdit(acc.totp)
         self.secret.setPlaceholderText("Секрет base32 (JBSW Y3DP …) или ссылка otpauth://totp/…")
+        self.imap = QLineEdit(acc.imap)
+        self.imap.setPlaceholderText("Для почты: imap.example.com — пусто, определится по адресу")
         self.preview = QLabel()
         self.preview.setObjectName("hint")
         self.notes = QPlainTextEdit(acc.notes)
@@ -54,7 +56,7 @@ class AccountForm(QWidget):
         f.setVerticalSpacing(10)
         for label, w in (("Сервис", self.service), ("Адрес", self.url), ("Логин", self.login),
                          ("Пароль", self.password), ("Секрет 2FA", self.secret), ("", self.preview),
-                         ("Заметки", self.notes)):
+                         ("IMAP-сервер", self.imap), ("Заметки", self.notes)):
             lbl = QLabel(label)
             lbl.setObjectName("formLabel")
             f.addRow(lbl, w)
@@ -93,6 +95,7 @@ class AccountForm(QWidget):
         a.login = self.login.text().strip()
         a.password = self.password.text()
         a.totp = self.secret.text().strip()
+        a.imap = self.imap.text().strip()
         a.notes = self.notes.toPlainText()
         return a
 

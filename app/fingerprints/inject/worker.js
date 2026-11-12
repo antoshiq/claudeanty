@@ -30,7 +30,8 @@
 
   if (self.WorkerNavigator) {
     defGet(WorkerNavigator.prototype, "hardwareConcurrency", FP.cores);
-    defGet(WorkerNavigator.prototype, "deviceMemory", FP.memory);
+    const realMem = navigator.deviceMemory;  // до подмены: потолок Chrome — 8 ГБ (см. stealth.js)
+    defGet(WorkerNavigator.prototype, "deviceMemory", realMem > 8 ? FP.memory : Math.min(FP.memory, 8));
     defGet(WorkerNavigator.prototype, "platform", FP.platform);  // CDP-платформа до воркеров не доходит
   }
   const GLP = FP.webgl.params || {};

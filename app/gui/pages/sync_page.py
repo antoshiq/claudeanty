@@ -78,8 +78,18 @@ class SyncPage(QWidget):
         self.start_btn.clicked.connect(self.start)
         for b in (all_btn, none_btn, self.stop_btn, self.start_btn):
             b.setCursor(Qt.PointingHandCursor)
+        self.arrange_btn = QPushButton("  Разложить окна")
+        set_icon(self.arrange_btn, "grid", "text", 14)
+        self.arrange_btn.setToolTip("Ведущий — в левый верхний угол, ведомые — сеткой по экрану")
+        self.arrange_btn.clicked.connect(self.arrange)
+        self.arrange_btn.setCursor(Qt.PointingHandCursor)
+        from PySide6.QtWidgets import QCheckBox
+        self.auto_arrange = QCheckBox("Раскладывать при запуске")
+        self.auto_arrange.setChecked(True)
         btns.addWidget(all_btn)
         btns.addWidget(none_btn)
+        btns.addWidget(self.arrange_btn)
+        btns.addWidget(self.auto_arrange)
         btns.addStretch()
         btns.addWidget(self.stop_btn)
         btns.addWidget(self.start_btn)
@@ -161,8 +171,24 @@ class SyncPage(QWidget):
             self.win.log(f"Ошибка синхронизации: {err}" if err else "Синхронизация включена — действуйте в ведущем профиле")
             self._last_ids = None
             self.refresh()
+            if not err and self.auto_arrange.isChecked():
+                self.arrange(wait=10)
 
         run_bg(lambda: manager.run(manager.sync.start(lead, fol), timeout=300), done, self)
+
+    def arrange(self, wait: float = 0):
+        from ...winlayout import SUPPORTED, arrange
+        st = manager.sync.status()
+        pids = [st["leader"], *st["followers"]] if st["active"] else [self.leader.currentData(), *self._selected()]
+        pids = [p for p in pids if p is not None and manager.is_running(p)]
+        if not SUPPORTED or not pids:
+            self.win.log("Нет запущенных профилей для расстановки" if SUPPORTED else "Расстановка окон — только в Windows")
+            return
+        skip = set(getattr(self.win, "browser_tabs", {}))
+        run_bg(lambda: arrange(pids, skip=skip, wait=wait),
+               lambda r, e: self.win.log(f"Расстановка окон: {e}" if e else
+                                         f"Окна разложены: {len(r['placed'])} ({r['cols']}×{r['rows']})"
+                                         + (f", без окна: {len(r['missing'])}" if r["missing"] else "")), self)
 
     def stop(self):
         run_bg(lambda: manager.run(manager.sync.stop()),

@@ -231,6 +231,10 @@ async def run_external(manager, pid: int, sites: Optional[list[str]] = None,
                 await page.goto(url, wait_until="domcontentloaded", timeout=60000)
                 parser = _PARSERS[key]
                 items = await (parser(page, sess.context, p) if key == "browserleaks" else parser(page, sess.context))
+                from .hostos import mismatch, warning
+                if key == "fingerprint" and mismatch(p.kind, p.os):  # у такого профиля Tampering ожидаем — объясняем
+                    items = [(st, t, f"{warning(p.kind, p.os, short=True)}. Возьмите ОС как у ПК"
+                              if t.endswith("Browser Tampering") and st != "ok" else d) for st, t, d in items]
                 res["items"] = [list(i) for i in items]
             except Exception as e:  # noqa: BLE001
                 res["error"] = str(e).splitlines()[0][:200]
@@ -247,6 +251,9 @@ async def run_external(manager, pid: int, sites: Optional[list[str]] = None,
     out["ok"] = sum(1 for s, *_ in all_items if s == "ok")
     out["warn"] = sum(1 for s, *_ in all_items if s == "warn")
     out["fail"] = sum(1 for s, *_ in all_items if s == "fail")
+    from . import activity, health
+    activity.log(pid, "check", f"внешние детекторы: ✓ {out['ok']}  ! {out['warn']}  ✗ {out['fail']}")
+    out["worse"] = [t for _, t, *_ in health.record(pid, "external", out)["worse"]]
     p = db.get_profile(pid)
     if p:
         p.last_external = out

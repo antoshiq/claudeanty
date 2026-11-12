@@ -116,10 +116,19 @@ def status(force: bool = False) -> dict:
 
 def update_chromium(log: Callable[[str], None] = lambda s: None) -> str:
     """Обновляет Playwright и его Chromium. Новая версия Playwright подхватится после перезапуска приложения."""
+    from .paths import FROZEN
     before = cv.version_of(cv.playwright_chromium())
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    for args, title in (([sys.executable, "-m", "pip", "install", "-U", "playwright"], "pip install -U playwright"),
-                        ([sys.executable, "-m", "playwright", "install", "chromium"], "playwright install chromium")):
+    if FROZEN:
+        # собранная версия: pip нет, Playwright обновляется вместе с claudeAnty; браузер — его же драйвером
+        from playwright._impl._driver import compute_driver_executable
+        drv = compute_driver_executable()
+        steps = [([*drv, "install", "chromium"] if isinstance(drv, tuple) else [str(drv), "install", "chromium"],
+                  "playwright install chromium")]
+    else:
+        steps = [([sys.executable, "-m", "pip", "install", "-U", "playwright"], "pip install -U playwright"),
+                 ([sys.executable, "-m", "playwright", "install", "chromium"], "playwright install chromium")]
+    for args, title in steps:
         log(f"Обновление движка: {title}…")
         r = subprocess.run(args, capture_output=True, text=True, timeout=1800, creationflags=flags)
         if r.returncode != 0:

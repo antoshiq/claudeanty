@@ -16,14 +16,17 @@ from ..widgets import empty_label, fill_list, set_icon, side_list, side_title, t
 from ..workers import run_bg
 
 _GROUPS = [("Навигация", ["open", "new_tab"]), ("Действия", ["click", "type", "press", "scroll", "captcha"]),
-           ("Ожидание", ["wait", "wait_for"]), ("Данные", ["extract", "set"]), ("Блоки", ["repeat", "if", "end"]),
+           ("Ожидание", ["wait", "wait_for"]), ("Данные", ["extract", "set"]),
+           ("Коды подтверждения", ["wait_email", "get_number", "wait_sms"]), ("Блоки", ["repeat", "if", "end"]),
            ("Прочее", ["screenshot"])]
 _STEP_ICONS = {"open": "globe", "new_tab": "plus", "click": "check", "type": "edit", "press": "key", "wait": "clock",
                "wait_for": "search", "scroll": "arrow_down", "repeat": "repeat", "if": "layers", "end": "chevron_up",
-               "screenshot": "download", "extract": "copy", "set": "tag", "captcha": "shield"}
+               "screenshot": "download", "extract": "copy", "set": "tag", "captcha": "shield",
+               "wait_email": "mail", "get_number": "phone", "wait_sms": "phone"}
 VARS_HINT = ("Подстановки: {{login}}, {{password}}, {{totp}} — из «Пароли и 2FA» профиля "
              "({{password:Google}} — аккаунт Google), {{name}}, {{id}}, {{random:6}}, {{date}}, а также "
-             "{{колонка}} из «Данные (CSV)» и переменные из шагов «Извлечь» / «Задать».")
+             "{{колонка}} из «Данные (CSV)», переменные из шагов «Извлечь» / «Задать», {{email_code}} — код из "
+             "письма, {{phone}} / {{phone_digits}} и {{sms_code}} — номер и код из SMS.")
 
 
 def step_form(step: dict) -> tuple[QWidget, callable]:
@@ -73,6 +76,21 @@ def step_form(step: dict) -> tuple[QWidget, callable]:
         f.addRow(lbl, ed)
     if any(k == "selector" for k, *_ in rpa.STEP_TYPES[step["type"]][1]):
         h = QLabel(rpa.SELECTOR_HINT)
+        h.setObjectName("hint")
+        h.setWordWrap(True)
+        f.addRow("", h)
+    if step["type"] == "wait_email":
+        h = QLabel("Ящик — аккаунт в «Пароли и 2FA» профиля: логин — адрес почты, пароль — пароль приложения "
+                   "(в Gmail, Яндексе, Mail.ru, Outlook обычный пароль по IMAP не работает), IMAP должен быть "
+                   "включён в настройках почты. Ищутся письма, пришедшие после начала сценария. Регулярное "
+                   "выражение с группой берёт группу: «code: (\\w+)», ссылку — «(https://\\S+confirm\\S+)».")
+        h.setObjectName("hint")
+        h.setWordWrap(True)
+        f.addRow("", h)
+    if step["type"] in ("get_number", "wait_sms"):
+        h = QLabel("Сервис и ключ — Настройки → Сценарии. «Получить номер» кладёт номер в {{phone}} (с +) и "
+                   "{{phone_digits}}; «Ждать SMS» — код в {{sms_code}} и завершает активацию. Не пришёл код или "
+                   "сценарий упал — номер отменяется, деньги возвращаются.")
         h.setObjectName("hint")
         h.setWordWrap(True)
         f.addRow("", h)

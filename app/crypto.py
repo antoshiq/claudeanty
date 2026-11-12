@@ -78,3 +78,115 @@ def chrome_key_readable(local_state: dict) -> bool:
         return True
     except Exception:  # noqa: BLE001
         return False
+
+
+# ---------------- зашифрованные файлы (передача профилей, резервные копии) ----------------
+# Формат: MAGIC | режим (1 байт) | длина заголовка (2 байта) | заголовок | префикс nonce (8 байт) | блоки.
+#   режим 1 — пароль: заголовок = соль 16 байт, ключ = scrypt(пароль, соль, n=2^15, r=8, p=1);
+#   режим 2 — ключ Windows: заголовок = случайный ключ AES-256, зашифрованный DPAPI (только этот ПК и пользователь).
+# Блок: длина (4 байта) | AES-256-GCM(до 1 МБ) с nonce = префикс + номер блока, AAD = «last»/«more» —
+# подмена, перестановка и обрезка файла обнаруживаются. Файл не грузится в память целиком.
+FILE_MAGIC = b"CAENC1\n"
+MODE_PASSWORD, MODE_DPAPI = 1, 2
+_CHUNK = 1 << 20
+
+
+class PasswordError(ValueError):
+    """Файл зашифрован паролем, а пароль не задан или неверный."""
+
+
+def _kdf(password: str, salt: bytes) -> bytes:
+    from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+    return Scrypt(salt=salt, length=32, n=2 ** 15, r=8, p=1).derive(password.encode("utf-8"))
+
+
+def is_encrypted_file(path) -> int:
+    """0 — обычный файл, иначе режим шифрования (MODE_PASSWORD / MODE_DPAPI)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(len(FILE_MAGIC) + 1)
+    except OSError:
+        return 0
+    return head[-1] if head.startswith(FILE_MAGIC) and len(head) > len(FILE_MAGIC) else 0
+
+
+def encrypt_file(src, dst, password: str = "", mode: int = MODE_PASSWORD) -> None:
+    import os
+    import struct
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    if mode == MODE_PASSWORD:
+        if not password:
+            raise PasswordError("нужен пароль")
+        header = os.urandom(16)
+        key = _kdf(password, header)
+    elif mode == MODE_DPAPI:
+        key = os.urandom(32)
+        header = dpapi_encrypt(key) if sys.platform == "win32" else b"plain" + key
+    else:
+        raise ValueError("неизвестный режим шифрования")
+    aes, prefix = AESGCM(key), os.urandom(8)
+    with open(src, "rb") as fi, open(dst, "wb") as fo:
+        fo.write(FILE_MAGIC + bytes([mode]) + struct.pack(">H", len(header)) + header + prefix)
+        n, cur = 0, fi.read(_CHUNK)
+        while True:
+            nxt = fi.read(_CHUNK)
+            last = not nxt
+            ct = aes.encrypt(prefix + struct.pack(">I", n), cur, b"last" if last else b"more")
+            fo.write(struct.pack(">I", len(ct)) + ct)
+            if last:
+                break
+            n, cur = n + 1, nxt
+
+
+def decrypt_file(src, dst, password: str = "") -> None:
+    import struct
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    with open(src, "rb") as fi:
+        if fi.read(len(FILE_MAGIC)) != FILE_MAGIC:
+            raise ValueError("файл не зашифрован claudeAnty")
+        mode = fi.read(1)[0]
+        (hlen,) = struct.unpack(">H", fi.read(2))
+        header = fi.read(hlen)
+        if mode == MODE_PASSWORD:
+            if not password:
+                raise PasswordError("файл защищён паролем")
+            key = _kdf(password, header)
+        elif mode == MODE_DPAPI:
+            if header.startswith(b"plain"):
+                key = header[5:]
+            else:
+                try:
+                    key = dpapi_decrypt(header)
+                except OSError as e:
+                    raise ValueError("файл зашифрован ключом Windows другого компьютера или пользователя — "
+                                     "открыть его можно только там, где он создан") from e
+        else:
+            raise ValueError("неизвестный режим шифрования (файл от более новой версии?)")
+        aes, prefix = AESGCM(key), fi.read(8)
+        with open(dst, "wb") as fo:
+            n = 0
+            while True:
+                raw = fi.read(4)
+                if len(raw) < 4:
+                    raise ValueError("файл обрезан (не скачался или не скопировался до конца)")
+                (ln,) = struct.unpack(">I", raw)
+                ct = fi.read(ln)
+                nonce = prefix + struct.pack(">I", n)
+                try:
+                    pt = aes.decrypt(nonce, ct, b"more")
+                    fo.write(pt)
+                    n += 1
+                    continue
+                except InvalidTag:
+                    pass
+                try:
+                    pt = aes.decrypt(nonce, ct, b"last")
+                except InvalidTag:
+                    if n == 0 and mode == MODE_PASSWORD:
+                        raise PasswordError("неверный пароль") from None
+                    raise ValueError("файл повреждён или изменён") from None
+                fo.write(pt)
+                if fi.read(1):
+                    raise ValueError("файл повреждён: данные после конца")
+                return

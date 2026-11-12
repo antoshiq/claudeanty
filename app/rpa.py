@@ -10,6 +10,9 @@
 {{random:6}} — случайные цифры, {{date}} — сегодняшняя дата, {{имя}} — колонка таблицы данных
 сценария или переменная из шагов «Извлечь» / «Задать переменную».
 
+Коды подтверждения: шаг «Ждать письмо» кладёт код из почты (IMAP, ящик — аккаунт профиля) в {{email_code}},
+«Получить номер» — номер 5sim / sms-activate в {{phone}}, «Ждать SMS» — код в {{sms_code}} (см. mailcode.py, sms.py).
+
 Таблица данных (CSV) у сценария: строка на профиль — по колонке profile (название или номер профиля)
 или по порядку запуска. Извлечённые значения сохраняются в data/rpa_results/<сценарий>_<время>.csv.
 """
@@ -43,6 +46,19 @@ STEP_TYPES: dict[str, tuple[str, list]] = {
                                           ("regex", "Регулярное выражение (необязательно)", "text", "")]),
     "set": ("Задать переменную", [("var", "Имя переменной", "text", ""), ("value", "Значение", "text", "")]),
     "captcha": ("Решить капчу", [("optional", "Пропустить, если капчи нет", "bool", True)]),
+    "wait_email": ("Ждать письмо с кодом", [
+        ("account", "Ящик — аккаунт профиля (сервис; пусто — первый с адресом почты)", "text", ""),
+        ("sender", "От кого (содержит)", "text", ""), ("subject", "Тема (содержит)", "text", ""),
+        ("regex", "Регулярное выражение для кода (пусто — число из 4–8 цифр)", "text", ""),
+        ("var", "Имя переменной", "text", "email_code"), ("timeout", "Не дольше, сек", "int", 120),
+        ("folders", "Папки через запятую", "text", "INBOX")]),
+    "get_number": ("Получить номер для SMS", [
+        ("service", "Сервис (5sim: telegram, google…; sms-activate: tg, go…)", "text", ""),
+        ("country", "Страна (5sim: russia, any…; sms-activate: 0, 1…)", "text", "any"),
+        ("operator", "Оператор", "text", "any"), ("var", "Имя переменной", "text", "phone")]),
+    "wait_sms": ("Ждать SMS с кодом", [("timeout", "Не дольше, сек", "int", 180),
+                                       ("regex", "Регулярное выражение (необязательно)", "text", ""),
+                                       ("var", "Имя переменной", "text", "sms_code")]),
     "repeat": ("Повторить N раз ↓", [("times", "Сколько раз", "int", 3)]),
     "if": ("Если… ↓", [("mode", "Условие", "choice:exists,missing,url_contains,url_not_contains,text_contains,var_equals",
                         "exists"), ("selector", "Элемент (для «есть / нет»)", "text", ""),
@@ -93,6 +109,15 @@ def describe(step: dict) -> str:
         return f"{title}: {{{{{step.get('var')}}}}} = «{step.get('value', '')}»"
     if t == "captcha":
         return title + (" (если есть)" if step.get("optional", True) else "")
+    if t == "wait_email":
+        cond = ", ".join(x for x in (f"от «{step['sender']}»" if step.get("sender") else "",
+                                     f"тема «{step['subject']}»" if step.get("subject") else "") if x)
+        return (f"Ждать письмо{' (' + cond + ')' if cond else ''} → {{{{{step.get('var') or 'email_code'}}}}}, "
+                f"до {step.get('timeout')} с")
+    if t == "get_number":
+        return f"Получить номер: {step.get('service')} / {step.get('country') or 'any'} → {{{{{step.get('var') or 'phone'}}}}}"
+    if t == "wait_sms":
+        return f"Ждать SMS → {{{{{step.get('var') or 'sms_code'}}}}}, до {step.get('timeout')} с"
     return title
 
 
@@ -117,8 +142,18 @@ def validate(steps: list[dict]) -> Optional[str]:
             return f"шаг {i}: не указан элемент"
         if s["type"] == "if" and s.get("mode", "exists") not in _SELECTOR_MODES and not str(s.get("value", "")).strip():
             return f"шаг {i}: не указано значение условия"
-        if s["type"] in ("extract", "set") and not re.fullmatch(r"[\w-]+", str(s.get("var", "")).strip()):
+        if s["type"] in ("extract", "set", "wait_email", "get_number", "wait_sms") and \
+                not re.fullmatch(r"[\w-]+", str(s.get("var", "")).strip()):
             return f"шаг {i}: имя переменной — латиница, цифры, _"
+        if s["type"] == "get_number" and not str(s.get("service", "")).strip():
+            return f"шаг {i}: не указан сервис для номера"
+        if s["type"] == "wait_sms" and not any(x.get("type") == "get_number" for x in steps[:i - 1]):
+            return f"шаг {i}: перед «Ждать SMS» нужен шаг «Получить номер»"
+        if s["type"] in ("extract", "wait_email") and s.get("regex"):
+            try:
+                re.compile(s["regex"])
+            except re.error as e:
+                return f"шаг {i}: ошибка в регулярном выражении — {e}"
         if s["type"] == "open" and not str(s.get("url", "")).strip():
             return f"шаг {i}: не указан адрес"
     if depth:
@@ -185,7 +220,9 @@ def make_vars(pid: int, variables: Optional[dict] = None) -> Callable[[str], str
         key = m.group(1).strip().lower()
         if key in low:
             return str(low[key])
-        raise ValueError(f"нет переменной {{{{{m.group(1).strip()}}}}} — добавьте колонку в таблицу данных или шаг «Извлечь»")
+        hint = {"email_code": "шаг «Ждать письмо»", "phone": "шаг «Получить номер»", "phone_digits": "шаг «Получить номер»",
+                "sms_code": "шаг «Ждать SMS»"}.get(key, "колонку в таблицу данных или шаг «Извлечь»")
+        raise ValueError(f"нет переменной {{{{{m.group(1).strip()}}}}} — добавьте {hint} раньше в сценарии")
 
     return lambda text: re.sub(r"\{\{([^}]+)\}\}", repl, text or "")
 
@@ -203,6 +240,9 @@ class Runner:
         self.extracted: dict = {}
         self.sub = make_vars(pid, self.vars)
         self.done = 0
+        self.started = time.time()  # письма с кодом ищем начиная с этого момента
+        self.mail_seen: set = set()  # письма, коды из которых уже использованы в этом прогоне
+        self.sms: Optional[dict] = None  # купленный номер, по которому ещё не пришёл код
 
     async def check(self, step: dict) -> bool:
         page = await self.current()
@@ -222,6 +262,24 @@ class Runner:
             have = {k.lower(): v for k, v in self.vars.items()}.get(name.strip().lower(), "")
             return str(have).strip() == want.strip()
         return False
+
+    def mail_account(self, service: str):
+        accs = db.list_accounts(self.pid)
+        if service:
+            acc = next((a for a in accs if a.service.lower() == service.lower()), None)
+            if not acc:
+                raise ValueError(f"в профиле нет аккаунта «{service}» (Пароли и 2FA)")
+        else:
+            mail = [a for a in accs if "@" in a.login and a.password]
+            # аккаунт «Почта» (импорт строками login:pass:email:email_pass) важнее аккаунта сайта с e-mail-логином
+            acc = next((a for a in mail if a.service.lower() in ("почта", "mail", "email", "e-mail") or a.imap),
+                       mail[0] if mail else None)
+            if not acc:
+                raise ValueError("в «Пароли и 2FA» профиля нет почты: нужен аккаунт с адресом в логине "
+                                 "и паролем приложения")
+        if not acc.password:
+            raise ValueError(f"у аккаунта «{acc.service or acc.login}» нет пароля для IMAP")
+        return acc
 
     async def current(self):
         if self.page is None or self.page.is_closed():
@@ -307,6 +365,47 @@ class Runner:
             if res.startswith("капчи на странице нет") and not s.get("optional", True):
                 raise RuntimeError("капча не найдена на странице")
             self.log(f"#{self.pid}: {res}")
+        elif t == "wait_email":
+            from .mailcode import wait_code
+            acc = self.mail_account(self.sub(s.get("account", "")).strip())
+            var = s.get("var", "email_code").strip()
+            self.log(f"#{self.pid}: жду письмо в {acc.login}…")
+            code = await wait_code(acc.login, acc.password, acc.imap, self.started, self.sub(s.get("sender", "")).strip(),
+                                   self.sub(s.get("subject", "")).strip(), s.get("regex", ""),
+                                   s.get("folders") or "INBOX", int(s.get("timeout", 120)), self.mail_seen)
+            self.vars[var] = self.extracted[var] = code
+            self.log(f"#{self.pid}: код из письма {{{{{var}}}}} = {code}")
+        elif t == "get_number":
+            from . import sms
+            if self.sms:
+                await sms.cancel(self.sms)
+                self.sms = None
+            act = await sms.buy(self.sub(s.get("service", "")), self.sub(s.get("country", "")),
+                                self.sub(s.get("operator", "")))
+            self.sms = act
+            var = s.get("var", "phone").strip()
+            self.vars[var] = self.extracted[var] = act["phone"]
+            self.vars[var + "_digits"] = act["digits"]
+            self.log(f"#{self.pid}: номер {act['phone']} ({act['provider']}, активация {act['id']})")
+        elif t == "wait_sms":
+            from . import sms
+            if not self.sms:
+                raise RuntimeError("нет номера, ожидающего SMS — сначала шаг «Получить номер»")
+            act = self.sms
+            try:
+                code = await sms.wait_code(act, int(s.get("timeout", 180)), log=lambda m: self.log(f"#{self.pid}: {m}"))
+            except BaseException:
+                self.sms = None
+                await sms.cancel(act)
+                raise
+            if s.get("regex"):
+                m = re.search(s["regex"], code)
+                code = (m.group(1) if m.groups() else m.group(0)) if m else code
+            self.sms = None
+            await sms.finish(act)
+            var = s.get("var", "sms_code").strip()
+            self.vars[var] = self.extracted[var] = code
+            self.log(f"#{self.pid}: код из SMS {{{{{var}}}}} = {code}")
         elif t == "screenshot":
             SHOTS_DIR.mkdir(parents=True, exist_ok=True)
             name = re.sub(r"[^\w.-]+", "_", self.sub(s.get("name") or "")) or "shot"
@@ -335,6 +434,11 @@ async def run_scenario(manager, scenario: dict, pid: int, headless: bool = False
         return {"pid": pid, "ok": False, "steps": runner.done, "error": msg, "seconds": round(time.time() - t0, 1),
                 "vars": runner.extracted}
     finally:
+        if runner.sms:  # номер купили, а код так и не понадобился/не пришёл — возвращаем деньги
+            from . import sms
+            act, runner.sms = runner.sms, None
+            await sms.cancel(act)
+            runner.log(f"#{pid}: номер {act['phone']} отменён")
         if close_after and not was_running:
             await manager.stop(pid)
 
@@ -413,6 +517,11 @@ class Jobs:
                 log(f"Сценарий «{sc['name']}» → профиль #{pid}…")
                 r = await run_scenario(manager, sc, pid, headless, close_after, log, data.get(pid))
                 job["done"] += 1
+                from . import activity
+                activity.log(pid, "scenario", f"«{sc['name']}»: " + (
+                    f"готово, шагов {r['steps']}, {r['seconds']} с" if r["ok"]
+                    else f"ошибка на шаге {r['steps'] + 1} — {r.get('error', '')}"), {"scenario": sc.get("id"),
+                                                                                   "ok": r["ok"]})
                 if not r["ok"]:
                     from .notify import notify
                     p = db.get_profile(pid)
